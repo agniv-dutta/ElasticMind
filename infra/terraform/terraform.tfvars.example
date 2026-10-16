@@ -1,0 +1,11 @@
+aws_region         = "us-east-1"
+environment        = "demo"
+budget_limit_usd   = 30
+budget_alert_email = "you@example.com"
+
+target_desired_count = 2
+target_min_count     = 1
+target_max_count     = 10
+
+task_cpu    = "256"
+task_memory = "512"

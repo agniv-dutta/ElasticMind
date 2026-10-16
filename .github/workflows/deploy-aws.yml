@@ -1,0 +1,71 @@
+name: deploy-aws
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Deploy or destroy the ElasticMind AWS stack"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+      image_tag:
+        description: "Image tag to build and deploy"
+        default: latest
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.8.5"
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform apply
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: terraform apply -auto-approve
+
+      - name: Login to ECR
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          echo "ACCOUNT=$ACCOUNT" >> "$GITHUB_ENV"
+          aws ecr get-login-password --region $AWS_REGION \
+            | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com
+        working-directory: .
+
+      - name: Build and push images
+        if: ${{ github.event.inputs.action == 'apply' }}
+        run: |
+          TAG=${{ github.event.inputs.image_tag }}
+          docker build -f infra/docker/target_app.Dockerfile -t $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/elasticmind-target-app:$TAG .
+          docker build -f infra/docker/backend.Dockerfile   -t $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/elasticmind-backend:$TAG .
+          docker push $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/elasticmind-target-app:$TAG
+          docker push $ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/elasticmind-backend:$TAG
+          aws ecs update-service --cluster elasticmind --service elasticmind-target  --force-new-deployment
+          aws ecs update-service --cluster elasticmind --service elasticmind-backend --force-new-deployment
+        working-directory: .
+
+      - name: Terraform destroy
+        if: ${{ github.event.inputs.action == 'destroy' }}
+        run: terraform destroy -auto-approve

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elasticmind-ml"
+version = "0.1.0"
+description = "ElasticMind ML module: workload data, features, predictors, evaluation"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyarrow>=15.0",
+    "scikit-learn>=1.4",
+    "lightgbm>=4.3",
+    "statsmodels>=0.14",
+    "joblib>=1.3",
+    "matplotlib>=3.8",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+lstm = ["torch>=2.1"]
+dev = ["pytest>=8.0", "ruff>=0.8", "black>=24.10"]
+
+[tool.setuptools.packages.find]
+include = ["ml*"]
+
+[tool.ruff]
+extend = "../pyproject.toml"
+
+[tool.black]
+line-length = 100

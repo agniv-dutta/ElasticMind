@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Models & data (regenerable)
+ml/models/artifacts/*
+!ml/models/artifacts/.gitkeep
+ml/data/generated/*
+!ml/data/generated/.gitkeep
+*.parquet
+*.joblib
+
+# Results (keep structure)
+experiments/results/*.csv
+experiments/results/*.png
+!experiments/results/.gitkeep
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Env & secrets
+.env
+*.pem
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!*.tfvars.example
+
+# SQLite
+*.db
+*.sqlite3
+backend/data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
