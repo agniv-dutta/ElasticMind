@@ -53,12 +53,13 @@ class LightGBMMultiHorizon(Predictor):
         self,
         horizons: tuple[int, ...] = DEFAULT_HORIZONS,
         params: dict[str, Any] | None = None,
+        lgb_params: dict[str, Any] | None = None,
         n_estimators: int = 400,
         val_fraction: float = 0.15,
         seed: int = 42,
     ) -> None:
         super().__init__(horizons)
-        self.params = dict(params or {})
+        self.params = dict(params or lgb_params or {})
         self.n_estimators = n_estimators
         self.val_fraction = val_fraction
         self.seed = seed
@@ -82,10 +83,10 @@ class LightGBMMultiHorizon(Predictor):
             self.feature_names_ = feats
 
             for q in QUANTILES:
-                model = lgb.LGBMRegressor(
-                    n_estimators=self.n_estimators,
-                    **_default_params(q, self.seed),
-                )
+                model_params = _default_params(q, self.seed)
+                model_params.update(self.params)
+                model_params["alpha"] = q
+                model = lgb.LGBMRegressor(n_estimators=self.n_estimators, **model_params)
                 model.fit(
                     train[feats],
                     train["target"],

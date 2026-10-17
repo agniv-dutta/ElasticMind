@@ -1,5 +1,7 @@
 # ElasticMind
 
+[![CI](https://github.com/agniv-dutta/ElasticMind/actions/workflows/ci.yml/badge.svg)](https://github.com/agniv-dutta/ElasticMind/actions/workflows/ci.yml)
+
 An ML-driven cloud resource manager that forecasts workload and auto-allocates
 capacity using a predictive controller with a reactive fallback. It evaluates
 accuracy, utilization, latency, cost and energy in a fully local, reproducible

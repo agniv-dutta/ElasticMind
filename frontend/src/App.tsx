@@ -6,6 +6,8 @@ import {
   ComposedChart,
   Line,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
@@ -17,6 +19,8 @@ import {
   ExperimentRow,
   ForecastPoint,
   Metrics,
+  ModelMetric,
+  ParetoPoint,
 } from './api'
 
 const POLL_MS = 5000
@@ -60,6 +64,8 @@ export default function App() {
   const [forecast, setForecast] = useState<ForecastPoint[]>([])
   const [decisions, setDecisions] = useState<Decision[]>([])
   const [experiments, setExperiments] = useState<ExperimentRow[]>([])
+  const [modelMetrics, setModelMetrics] = useState<ModelMetric[]>([])
+  const [pareto, setPareto] = useState<ParetoPoint[]>([])
   const [policy, setPolicy] = useState<string>('ml')
   const [page, setPage] = useState<'dashboard' | 'experiments'>('dashboard')
   const [bias, setBias] = useState(0)
@@ -69,12 +75,14 @@ export default function App() {
     let alive = true
     const tick = async () => {
       try {
-        const [m, c, f, d, e] = await Promise.all([
+        const [m, c, f, d, e, mm, pf] = await Promise.all([
           api.metrics(),
           api.capacity(),
           api.forecast(),
           api.decisions(),
           api.experiments(),
+          api.modelComparison(),
+          api.pareto(),
         ])
         if (!alive) return
         setMetrics(m)
@@ -82,6 +90,8 @@ export default function App() {
         setForecast(f.forecast)
         setDecisions(d)
         setExperiments(e)
+        setModelMetrics(mm)
+        setPareto(pf)
         setErr(null)
       } catch (e) {
         if (alive) setErr(String(e))
@@ -288,6 +298,7 @@ export default function App() {
           </div>
         </>
       ) : (
+        <div className="space-y-3">
         <div className="card">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-white">Compare experiments (simulated)</h2>
@@ -326,6 +337,37 @@ export default function App() {
               </tbody>
             </table>
           </div>
+        </div>
+        <div className="card">
+          <h2 className="text-sm font-semibold text-white">Model error by horizon</h2>
+          <div className="h-56 mt-3">
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={modelMetrics}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="horizon_min" tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                <Tooltip />
+                {[...new Set(modelMetrics.map((m) => m.model))].map((model, i) => (
+                  <Line key={model} dataKey="mape" name={model} stroke={['#5eead4', '#fbbf24', '#f87171'][i % 3]} />
+                ))}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+        <div className="card">
+          <h2 className="text-sm font-semibold text-white">Cost vs SLA violations</h2>
+          <div className="h-56 mt-3">
+            <ResponsiveContainer width="100%" height="100%">
+              <ScatterChart>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis type="number" dataKey="cost_sim" name="cost" tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                <YAxis type="number" dataKey="sla_viol_sim" name="SLA violations" tick={{ fill: '#94a3b8', fontSize: 10 }} />
+                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
+                <Scatter data={pareto} fill="#5eead4" />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
         </div>
       )}
     </div>

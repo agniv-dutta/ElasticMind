@@ -62,12 +62,29 @@ export type ExperimentRow = {
   [k: string]: unknown
 }
 
+export type ModelMetric = {
+  model: string
+  horizon_min: number
+  mape: number
+  mae: number
+  rmse: number
+  under_pred_rate: number
+}
+
+export type ParetoPoint = {
+  policy: string
+  cost_sim: number
+  sla_viol_sim: number
+}
+
 export const api = {
   forecast: () => get<{ model: string; forecast: ForecastPoint[] }>('/forecast'),
   metrics: () => get<Metrics>('/metrics'),
   capacity: () => get<Capacity>('/capacity'),
   decisions: () => get<Decision[]>('/decisions'),
   experiments: () => get<ExperimentRow[]>('/experiments'),
+  modelComparison: () => get<ModelMetric[]>('/models/comparison'),
+  pareto: () => get<ParetoPoint[]>('/policies/pareto'),
   start: () => post('/autoscaler/start'),
   stop: () => post('/autoscaler/stop'),
   policy: (policy: string) => post('/autoscaler/policy', { policy }),

@@ -134,7 +134,11 @@ class ControlLoop:
         if desired == cur:
             reason = "no_change (within bounds)"
         else:
-            reason = f"{action} d={desired} c={cur}"
+            reason = (
+                f"{action} {cur}->{desired} because P90 forecast at "
+                f"+15 min = {inp.predicted_load_p90:.0f} req/min; "
+                f"headroom={inp.headroom:.0%}"
+            )
 
         if desired != cur:
             self.state.current_instances = desired

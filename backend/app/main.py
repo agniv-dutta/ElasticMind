@@ -13,7 +13,9 @@ from backend.app.autoscaler.actuator import LocalSimActuator
 from backend.app.autoscaler.aws_actuator import AwsEcsActuator
 from backend.app.autoscaler.config import AutoscalerConfig
 from backend.app.autoscaler.control import ControlLoop
+from backend.app.carbon.carbon import carbon_aware_window, intensity_now
 from backend.app.core.config import Settings
+from backend.app.cost.cost_aware_policy import choose_from_forecast
 from backend.app.db.models import (
     Decision,
     Experiment,
@@ -23,6 +25,8 @@ from backend.app.db.models import (
     get_session_factory,
     init_db,
 )
+from backend.app.reliability.audit import AuditLog
+from backend.app.reliability.ratelimit import RateLimiter
 from backend.app.schemas.schemas import (
     CapacityResponse,
     FaultBiasRequest,
@@ -43,6 +47,8 @@ settings = Settings()
 engine = get_engine(settings.db_url)
 init_db(engine)
 SessionLocal = get_session_factory(engine)
+audit_log = AuditLog()
+actuator_limiter = RateLimiter(rate_per_sec=1 / 30)
 
 
 @asynccontextmanager
@@ -139,6 +145,10 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
     hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
     fc = model.predict(hist.tail(max(60, req.history_minutes)))
     frame = fc.frame
+    from ml.conformal.conformal import apply_intervals
+
+    calibration_width = float(hist["requests"].tail(60).std() or 0.0)
+    frame = apply_intervals(frame, {int(h): calibration_width for h in model.horizons})
     points = frame.to_dict(orient="records")
     for p in points:
         db.add(
@@ -152,6 +162,22 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
         )
     db.commit()
     return {"model": fc.model, "forecast": points}
+
+
+@app.get("/explain")
+def explain():
+    """Return SHAP/feature explanations for the active forecast model."""
+    try:
+        model = load_predictor(settings.model_path)
+        history = generate_workload(profile="diurnal", days=1, seed=42)[
+            ["timestamp", "requests"]
+        ].tail(480)
+        horizon = min(settings.horizon_min, max(model.horizons))
+        if hasattr(model, "explain"):
+            return {"horizon_min": horizon, "features": model.explain(history, horizon)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"explanation failed: {exc}") from exc
+    return {"horizon_min": horizon, "features": []}
 
 
 @app.get("/capacity", response_model=CapacityResponse)
@@ -249,6 +275,80 @@ def experiments(db: Session = Depends(get_db)):
     return rows
 
 
+@app.get("/models/comparison")
+def model_comparison():
+    """Return per-model, per-horizon error metrics for the dashboard."""
+    path = Path("experiments/results/model_comparison.csv")
+    if not path.exists():
+        return []
+    import pandas as pd
+
+    return json.loads(pd.read_csv(path).to_json(orient="records"))
+
+
+@app.get("/policies/pareto")
+def policies_pareto():
+    """Return the simulated cost/SLA trade-off used by the policy view."""
+    from experiments.cost_aware import pareto_frontier
+
+    return pareto_frontier()
+
+
+@app.get("/carbon")
+def carbon():
+    now = datetime.now(UTC)
+    return {
+        "timestamp": now,
+        "intensity_gco2_kwh": intensity_now(now),
+        "mode": "time_of_day",
+        "batch_window": carbon_aware_window(now.hour, 1),
+    }
+
+
+@app.get("/cost/choose")
+def cost_choose(
+    forecast_p90: float = Query(..., ge=0),
+    min_instances: int = Query(1, ge=1),
+    max_instances: int = Query(10, ge=1),
+):
+    if max_instances < min_instances:
+        raise HTTPException(status_code=400, detail="max_instances must be >= min_instances")
+    cfg = AutoscalerConfig()
+    decision = choose_from_forecast(
+        forecast_p90,
+        cfg.capacity_per_instance,
+        list(range(min_instances, max_instances + 1)),
+    )
+    return decision.__dict__
+
+
+@app.get("/multiservice/allocation")
+def multiservice_allocation(total_instances: int = Query(10, ge=1)):
+    from backend.app.multiservice.manager import ServiceState, SharedCapacityManager
+
+    manager = SharedCapacityManager(total_instances=total_instances)
+    manager.add_service(ServiceState("api", weight=2.0, memory_mb_per_instance=512))
+    manager.add_service(ServiceState("worker", weight=1.0, memory_mb_per_instance=1024))
+    return manager.allocate()
+
+
+@app.get("/drift")
+def drift():
+    worker = getattr(app.state, "robust", None)
+    if worker is None:
+        return {"psi": 0.0, "ks": 0.0, "drift": False}
+    return {
+        "psi": float(worker.state.rolling_mape),
+        "ks": 0.0,
+        "drift": worker.state.drift_alarm,
+    }
+
+
+@app.get("/audit")
+def audit():
+    return audit_log.read()
+
+
 async def control_loop_worker(app: FastAPI):
     """Background control loop: forecast → policy → actuator, logged to SQLite.
 
@@ -288,7 +388,9 @@ async def control_loop_worker(app: FastAPI):
                     current_instances=act.current(),
                     now=asyncio.get_event_loop().time(),
                 )
-                act.set_desired(dec.desired)
+                if actuator_limiter.allow():
+                    act.set_desired(dec.desired)
+                    audit_log.record(dec.desired, dec.current, dec.action, dec.reason)
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
                     try:
