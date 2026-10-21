@@ -1,5 +1,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
+ARG VITE_API_BASE
+ENV VITE_API_BASE=${VITE_API_BASE:-/api}
 COPY frontend/package.json frontend/package-lock.json* frontend/
 RUN cd frontend && npm install
 COPY frontend/ frontend/

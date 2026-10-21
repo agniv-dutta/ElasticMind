@@ -1,18 +1,34 @@
 const BASE = import.meta.env.VITE_API_BASE ?? ''
 
 async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`)
+  const url = `${BASE}${path}`
+  const r = await fetch(url)
   if (!r.ok) throw new Error(`${path} -> ${r.status}`)
+  
+  const contentType = r.headers.get('content-type')
+  if (!contentType?.includes('application/json')) {
+    const text = await r.text()
+    throw new Error(`${path} returned ${contentType || 'no content-type'} instead of JSON. Response starts with: ${text.substring(0, 100)}`)
+  }
+  
   return r.json() as Promise<T>
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(`${BASE}${path}`, {
+  const url = `${BASE}${path}`
+  const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
   })
   if (!r.ok) throw new Error(`${path} -> ${r.status}`)
+  
+  const contentType = r.headers.get('content-type')
+  if (!contentType?.includes('application/json')) {
+    const text = await r.text()
+    throw new Error(`${path} returned ${contentType || 'no content-type'} instead of JSON. Response starts with: ${text.substring(0, 100)}`)
+  }
+  
   return r.json() as Promise<T>
 }
 

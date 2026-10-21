@@ -12,7 +12,7 @@ services:
       ELASTICMIND_ENV: docker
       ELASTICMIND_DB_URL: sqlite:////data/elasticmind.db
       TARGET_APP_BASE_URL: http://target_app:8001
-      ELASTICMIND_MODEL_PATH: /models/lightgbm_multihorizon.joblib
+      ELASTICMIND_MODEL_PATH: /models/lightgbm.joblib
     volumes:
       - backend-data:/data
       - ./ml/models/artifacts:/models:ro
@@ -27,20 +27,15 @@ services:
     build:
       context: .
       dockerfile: infra/docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE: /api
     image: elasticmind-frontend:local
     ports:
       - "5173:80"
-    environment:
-      VITE_API_BASE: /api
     depends_on:
       backend:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+
 
   target_app:
     build:

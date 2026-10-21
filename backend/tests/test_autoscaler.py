@@ -125,3 +125,92 @@ def test_zero_load_min_clamp() -> None:
     p = MLForecastPolicy()
     d = p.compute_desired(0, 0, 500, 0.7, 0.2, 1, 5, 500)
     assert d == 1
+
+
+def test_controller_respects_capacity_limits() -> None:
+    """Test that controller doesn't exceed min/max instances."""
+    cfg = AutoscalerConfig(
+        min_instances=2,
+        max_instances=5,
+        capacity_per_instance=100,
+        target_utilization=0.7,
+        headroom=0.2,
+        fast_scale_up_cooldown_s=0,
+        slow_scale_down_cooldown_s=0,
+    )
+    loop = ControlLoop(cfg)
+    loop.reset(current_instances=2)
+    
+    # Very high load - should cap at max_instances (5)
+    d = loop.evaluate(predicted_load_p50=10000, predicted_load_p90=10000, current_capacity=200)
+    assert d.desired == 5
+    assert d.action == "scale_up"
+    
+    # Very low load - should cap at min_instances (2)
+    loop.reset(current_instances=5)
+    d2 = loop.evaluate(predicted_load_p50=0, predicted_load_p90=0, current_capacity=500)
+    assert d2.desired == 2
+    assert d2.action == "scale_down"
+
+
+def test_controller_with_changing_workload() -> None:
+    """Test controller responds to changing workload patterns."""
+    cfg = AutoscalerConfig(
+        min_instances=1,
+        max_instances=10,
+        capacity_per_instance=100,
+        target_utilization=0.7,
+        headroom=0.2,
+        fast_scale_up_cooldown_s=0,
+        slow_scale_down_cooldown_s=0,
+    )
+    loop = ControlLoop(cfg)
+    loop.reset(current_instances=1)
+    
+    # Low load - should stay at min
+    d1 = loop.evaluate(predicted_load_p50=50, predicted_load_p90=60, current_capacity=100)
+    assert d1.desired == 1
+    assert d1.action == "no_change"
+    
+    # Medium load - should scale up moderately
+    d2 = loop.evaluate(predicted_load_p50=400, predicted_load_p90=500, current_capacity=100)
+    assert d2.desired > 1
+    assert d2.action == "scale_up"
+    
+    # Update state
+    loop.state.current_instances = d2.desired
+    
+    # High load - should scale up more
+    d3 = loop.evaluate(predicted_load_p50=800, predicted_load_p90=900, current_capacity=d2.desired * 100)
+    assert d3.desired > d2.desired
+    
+    # Load drops - should scale down
+    loop.state.current_instances = d3.desired
+    d4 = loop.evaluate(predicted_load_p50=100, predicted_load_p90=120, current_capacity=d3.desired * 100)
+    assert d4.desired < d3.desired
+
+
+def test_controller_records_meaningful_reasons() -> None:
+    """Test that controller provides descriptive reasons for decisions."""
+    cfg = AutoscalerConfig(
+        min_instances=1,
+        max_instances=10,
+        capacity_per_instance=100,
+        target_utilization=0.7,
+        headroom=0.2,
+        fast_scale_up_cooldown_s=0,
+        slow_scale_down_cooldown_s=0,
+    )
+    loop = ControlLoop(cfg)
+    loop.reset(current_instances=1)
+    
+    # Scale up decision
+    d1 = loop.evaluate(predicted_load_p50=500, predicted_load_p90=600, current_capacity=100)
+    assert d1.action == "scale_up"
+    assert "scale_up" in d1.reason
+    assert "P90" in d1.reason
+    
+    # No change decision
+    d2 = loop.evaluate(predicted_load_p50=500, predicted_load_p90=600, current_capacity=100)
+    assert d2.action == "no_change"
+    assert "within bounds" in d2.reason

@@ -43,6 +43,18 @@ from ml.models.registry import load_predictor
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+# Shared state for live metrics from loadgen
+class LiveMetrics:
+    def __init__(self):
+        self.requests_per_min = 0.0
+        self.latency_p50_ms = 0.0
+        self.latency_p95_ms = 0.0
+        self.success_rate = 1.0
+        self.timestamp = datetime.now(UTC)
+        self.request_count = 0
+
+live_metrics = LiveMetrics()
+
 settings = Settings()
 engine = get_engine(settings.db_url)
 init_db(engine)
@@ -183,10 +195,19 @@ def explain():
 @app.get("/capacity", response_model=CapacityResponse)
 def capacity():
     cfg = AutoscalerConfig()
-    act = _get_actuator()
+    # Use the same actuator instance that the control loop uses for consistency
+    robust = getattr(app.state, "robust", None)
+    if robust and hasattr(robust, "_loop"):
+        act = robust._loop
+        current = act.state.current_instances
+        desired = act.state.current_instances  # The control loop updates desired in the state
+    else:
+        act = _get_actuator()
+        current = act.current()
+        desired = act.desired()
     return {
-        "current_instances": act.current(),
-        "desired_instances": act.desired(),
+        "current_instances": current,
+        "desired_instances": desired,
         "capacity_per_instance": cfg.capacity_per_instance,
         "target_utilization": cfg.target_utilization,
     }
@@ -218,6 +239,31 @@ def fault_spike(req: FaultSpikeRequest):
     return {"magnitude": req.magnitude, "duration_minutes": req.duration_minutes, "simulated": True}
 
 
+# Shared state for live metrics from loadgen
+class LiveMetrics:
+    def __init__(self):
+        self.requests_per_min = 0.0
+        self.latency_p50_ms = 0.0
+        self.latency_p95_ms = 0.0
+        self.success_rate = 1.0
+        self.timestamp = datetime.now(UTC)
+        self.request_count = 0
+
+live_metrics = LiveMetrics()
+
+
+@app.post("/metrics")
+def receive_metrics(data: dict):
+    """Receive metrics from loadgen (simulated measurements)."""
+    live_metrics.requests_per_min = data.get("requests_total", 0) / max(data.get("duration_s", 1), 0.1) * 60
+    live_metrics.latency_p50_ms = data.get("latency_p50_ms", 0.0)
+    live_metrics.latency_p95_ms = data.get("latency_p95_ms", 0.0)
+    live_metrics.success_rate = data.get("success_rate", 1.0)
+    live_metrics.request_count = data.get("requests_total", 0)
+    live_metrics.timestamp = datetime.now(UTC)
+    return {"status": "received", "simulated": True}
+
+
 @app.get("/metrics", response_model=MetricsResponse)
 @app.get("/metrics/current")
 def metrics_current():
@@ -225,17 +271,30 @@ def metrics_current():
     cfg = AutoscalerConfig()
     now = datetime.now(UTC)
     current = act.current()
-    # simulated snapshot
-    util = 0.65
-    latency_ms = 25.0
-    cost_usd = current * (cfg.capacity_per_instance * 0.0001)  # placeholder
+    
+    # Use live metrics from loadgen if available, otherwise synthetic baseline
+    if live_metrics.request_count > 0:
+        # Calculate utilization based on requests per minute vs capacity
+        rpm = live_metrics.requests_per_min
+        capacity = current * cfg.capacity_per_instance
+        util = min(rpm / max(capacity, 1.0), 1.0)
+        latency_ms = live_metrics.latency_p50_ms
+        # If latency exceeds threshold, count as SLA violation
+        sla_count = 1 if latency_ms > 500 else 0
+    else:
+        # Fallback to synthetic baseline when no loadgen data
+        util = 0.0
+        latency_ms = 0.0
+        sla_count = 0
+    
+    cost_usd = current * (cfg.capacity_per_instance * 0.0001)  # simulated
     energy_kwh = current * 0.05  # simulated
     return MetricsResponse(
         current_utilization=util,
         latency_ms=latency_ms,
         cost_usd=cost_usd,
         energy_kwh=energy_kwh,
-        sla_count=0,
+        sla_count=sla_count,
         timestamp=now,
     )
 
@@ -353,7 +412,7 @@ async def control_loop_worker(app: FastAPI):
     """Background control loop: forecast → policy → actuator, logged to SQLite.
 
     Uses the safeguarded controller so the reactive safety net / drift fallback
-    apply when the forecast is wrong.
+    apply when the forecast is wrong. Uses live metrics from loadgen when available.
     """
     from backend.app.robustness.safeguards import SafeguardedController
 
@@ -372,8 +431,13 @@ async def control_loop_worker(app: FastAPI):
                 h = min(settings.horizon_min, max(model.horizons))
                 p50, p90 = fc.latest(h)
 
-                # "live" measured load = last observed demand; observe forecast error
-                actual = float(hist["requests"].iloc[-1])
+                # Use live metrics from loadgen if available, otherwise synthetic baseline
+                if live_metrics.request_count > 0:
+                    actual = live_metrics.requests_per_min
+                else:
+                    actual = float(hist["requests"].iloc[-1])
+                
+                # Observe forecast error
                 if prev_pred is not None:
                     robust.observe(prev_pred, actual)
                 prev_pred = p50
@@ -390,6 +454,8 @@ async def control_loop_worker(app: FastAPI):
                 )
                 if actuator_limiter.allow():
                     act.set_desired(dec.desired)
+                    # Update the control loop state to match the actuator
+                    robust._loop.state.current_instances = dec.desired
                     audit_log.record(dec.desired, dec.current, dec.action, dec.reason)
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
