@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
+from backend.app.core.config import Settings
 
 
 @dataclass
@@ -12,11 +13,11 @@ class PredictivePolicyInput:
     predicted_load_p50: float
     predicted_load_p90: float
     current_capacity: float
-    target_utilization: float = 0.70
+    target_utilization: float = field(default_factory=lambda: Settings().TARGET_UTILIZATION)
     headroom: float = 0.20
-    min_instances: int = 1
-    max_instances: int = 10
-    capacity_per_instance: float = 500.0
+    min_instances: int = field(default_factory=lambda: Settings().MIN_REPLICAS)
+    max_instances: int = field(default_factory=lambda: Settings().MAX_REPLICAS)
+    capacity_per_instance: float = field(default_factory=lambda: Settings().CAPACITY_PER_REPLICA_RPM)
 
 
 class Policy(Protocol):
@@ -39,12 +40,17 @@ class MLForecastPolicy:
         predicted_load_p50: float,
         predicted_load_p90: float,
         current_capacity: float,
-        target_utilization: float = 0.70,
+        target_utilization: float | None = None,
         headroom: float = 0.20,
-        min_instances: int = 1,
-        max_instances: int = 10,
-        capacity_per_instance: float = 500.0,
+        min_instances: int | None = None,
+        max_instances: int | None = None,
+        capacity_per_instance: float | None = None,
     ) -> int:
+        settings = Settings()
+        target_utilization = settings.TARGET_UTILIZATION if target_utilization is None else target_utilization
+        min_instances = settings.MIN_REPLICAS if min_instances is None else min_instances
+        max_instances = settings.MAX_REPLICAS if max_instances is None else max_instances
+        capacity_per_instance = settings.CAPACITY_PER_REPLICA_RPM if capacity_per_instance is None else capacity_per_instance
         load = predicted_load_p90 if self.prefer == "p90" else predicted_load_p50
         load = max(0.0, load)
         effective_cap_per_inst = capacity_per_instance * target_utilization
@@ -70,9 +76,12 @@ class ReactiveThresholdPolicy:
         self,
         current_utilization: float,
         current_instances: int,
-        min_instances: int = 1,
-        max_instances: int = 10,
+        min_instances: int | None = None,
+        max_instances: int | None = None,
     ) -> int:
+        settings = Settings()
+        min_instances = settings.MIN_REPLICAS if min_instances is None else min_instances
+        max_instances = settings.MAX_REPLICAS if max_instances is None else max_instances
         if current_instances < min_instances:
             return min_instances
         if current_utilization > 0.80:
@@ -90,8 +99,11 @@ class StaticPolicy:
 
     def compute_desired(
         self,
-        min_instances: int = 1,
-        max_instances: int = 10,
+        min_instances: int | None = None,
+        max_instances: int | None = None,
         **_: object,
     ) -> int:
+        settings = Settings()
+        min_instances = settings.MIN_REPLICAS if min_instances is None else min_instances
+        max_instances = settings.MAX_REPLICAS if max_instances is None else max_instances
         return max(min_instances, min(max_instances, self.fixed))

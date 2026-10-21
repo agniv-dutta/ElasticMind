@@ -133,6 +133,7 @@ class ControlLoop:
 
         if desired == cur:
             reason = "no_change (within bounds)"
+            self.state.last_reason = reason
         else:
             reason = (
                 f"{action} {cur}->{desired} because P90 forecast at "

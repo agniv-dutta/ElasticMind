@@ -14,6 +14,7 @@ import pandas as pd
 
 from backend.app.autoscaler.config import AutoscalerConfig
 from backend.app.autoscaler.control import ControlLoop
+from backend.app.core.config import Settings
 from backend.app.simulator.simulator import SimConfig, WorkloadReplaySimulator, summarize_simulation
 from ml.models.registry import load_predictor
 
@@ -117,9 +118,10 @@ def plot_comparison(results_dir: Path, policy: str, sim: pd.DataFrame) -> Path:
 
 
 def run_all(trace_path: str | Path, out_dir: Path = Path("experiments/results")) -> pd.DataFrame:
+    settings = Settings()
     trace = _load_trace(trace_path)
-    cfg = AutoscalerConfig()
-    sim_cfg = SimConfig(provisioning_delay_s=90.0)
+    cfg = AutoscalerConfig.from_settings(settings)
+    sim_cfg = SimConfig.from_settings(settings)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     policies: list[tuple[str, list[int]]] = []

@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 from dataclasses import dataclass
 from time import time
+from backend.app.core.config import Settings
 
 
 @dataclass
@@ -37,11 +38,17 @@ class LocalSimActuator(CapacityActuator):
     actuator itself records the decision timestamp.
     """
 
-    def __init__(self, initial: int = 2, min_c: int = 1, max_c: int = 10, delay_s: float = 90.0) -> None:
+    def __init__(self, initial: int | None = None, min_c: int | None = None, max_c: int | None = None,
+                 startup_delay_s: float | None = None, drain_delay_s: float | None = None) -> None:
+        settings = Settings()
+        min_c = settings.MIN_REPLICAS if min_c is None else min_c
+        max_c = settings.MAX_REPLICAS if max_c is None else max_c
+        initial = min_c if initial is None else initial
         self._current = max(min_c, min(max_c, initial))
         self._min = min_c
         self._max = max_c
-        self._delay = delay_s
+        self._startup_delay = settings.scaled_delay(settings.STARTUP_DELAY_S) if startup_delay_s is None else startup_delay_s
+        self._drain_delay = settings.scaled_delay(settings.DRAIN_DELAY_S) if drain_delay_s is None else drain_delay_s
         self._last_action_ts: float | None = None
 
     def desired(self) -> int:
@@ -58,4 +65,4 @@ class LocalSimActuator(CapacityActuator):
         return action
 
     def apply_delay(self, action: ScalingAction) -> float:
-        return self._delay
+        return self._startup_delay if action.desired > action.current else self._drain_delay

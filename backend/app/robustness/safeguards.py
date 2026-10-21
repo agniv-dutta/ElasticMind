@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from backend.app.autoscaler.config import AutoscalerConfig
 from backend.app.autoscaler.control import ControlLoop, ScalingDecision
 from backend.app.autoscaler.policy import ReactiveThresholdPolicy
+from backend.app.core.config import Settings
 
 
 @dataclass
@@ -68,7 +69,7 @@ class SafeguardedController:
     def __init__(
         self,
         cfg: AutoscalerConfig | None = None,
-        trigger_utilization: float = 0.90,
+        trigger_utilization: float | None = None,
         drift_mape_threshold: float = 0.30,
         recover_mape_threshold: float = 0.15,
         base_headroom: float = 0.20,
@@ -76,7 +77,7 @@ class SafeguardedController:
         window: int = 30,
     ) -> None:
         self.cfg = cfg or AutoscalerConfig()
-        self.trigger_utilization = trigger_utilization
+        self.trigger_utilization = trigger_utilization if trigger_utilization is not None else Settings().SAFETY_UTILIZATION_THRESHOLD
         self.drift_mape_threshold = drift_mape_threshold
         self.recover_mape_threshold = recover_mape_threshold
         self.base_headroom = base_headroom

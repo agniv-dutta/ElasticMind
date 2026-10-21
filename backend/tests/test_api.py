@@ -14,6 +14,15 @@ def test_health() -> None:
     assert resp.json()["status"] == "ok"
 
 
+def test_config_endpoint_exposes_shared_settings() -> None:
+    resp = client.get("/config")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["PROFILE"] in {"offline", "local_demo", "aws_demo"}
+    assert body["TIME_SCALE"] > 0
+    assert body["CAPACITY_PER_REPLICA_RPM"] > 0
+
+
 def test_predict_and_forecast() -> None:
     resp = client.post("/predict", json={"horizon_min": 15, "history_minutes": 240})
     assert resp.status_code == 200

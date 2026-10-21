@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "elasticmind-loadgen"
 version = "0.1.0"
 description = "ElasticMind load generator: async HTTP traffic replay"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",

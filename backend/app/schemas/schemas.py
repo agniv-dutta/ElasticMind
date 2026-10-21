@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from pydantic import BaseModel, Field
+from backend.app.core.config import Settings
 
 
 class PredictRequest(BaseModel):
-    horizon_min: int = 15
+    horizon_min: int = Field(default_factory=lambda: Settings().FORECAST_HORIZON_MIN)
     history_minutes: int = 240
 
 

@@ -52,6 +52,22 @@ elasticmind/
 
 ## Quickstart
 
+### Shared runtime settings
+
+Backend, load generator, and experiment scripts use the same `Settings` model
+from `backend.app.core.config`. Values come from `config.yaml` in the working
+directory, then `ELASTICMIND_*` environment variables override them. For
+example, set `ELASTICMIND_TIME_SCALE=10` to run delays and cooldowns at one tenth
+of their configured wall-clock duration. The effective values are available at
+`GET /config`.
+
+The settings fields are `PROFILE`, `TIME_SCALE`, `ACTUATOR`,
+`CONTROL_INTERVAL_S`, `FORECAST_HORIZON_MIN`, `TARGET_UTILIZATION`,
+`CAPACITY_PER_REPLICA_RPM`, `MIN_REPLICAS`, `MAX_REPLICAS`, `STARTUP_DELAY_S`,
+`DRAIN_DELAY_S`, `SLA_LATENCY_MS`, `PRICE_PER_REPLICA_HOUR`, `IDLE_WATTS`,
+`PEAK_WATTS`, `COOLDOWN_UP_S`, `COOLDOWN_DOWN_S`, and
+`SAFETY_UTILIZATION_THRESHOLD`.
+
 ### 1. Python environment
 
 ```bash

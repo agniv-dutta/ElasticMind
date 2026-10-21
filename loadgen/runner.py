@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import pandas as pd
 from ml.data.generate import generate_workload
+from backend.app.core.config import Settings
 
 
 def _load_trace(path: str | None, profile: str, days: int) -> pd.DataFrame:
@@ -36,7 +37,7 @@ async def run_load(
     trace_path: str | None = None,
     profile: str = "diurnal",
     days: int = 1,
-    speed_factor: float = 10.0,
+    speed_factor: float | None = None,
     max_requests: int | None = None,
     concurrency: int = 8,
 ) -> dict:
@@ -44,6 +45,8 @@ async def run_load(
 
     Returns a summary dict with request count, success rate, p50, p95 latency.
     """
+    settings = Settings()
+    speed_factor = settings.TIME_SCALE if speed_factor is None else speed_factor
     trace = _load_trace(trace_path, profile, days)
     requests_per_min = trace["requests"].astype(float).tolist()
 
@@ -124,7 +127,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--trace", default=os.getenv("LOADGEN_TRACE"))
     p.add_argument("--profile", default=os.getenv("LOADGEN_PROFILE", "diurnal"))
     p.add_argument("--days", type=int, default=int(os.getenv("LOADGEN_DAYS", "1")))
-    p.add_argument("--speed-factor", type=float, default=float(os.getenv("LOADGEN_SPEED_FACTOR", "10")))
+    p.add_argument("--speed-factor", type=float, default=None)
     p.add_argument("--max-requests", type=int, default=None)
     p.add_argument("--concurrency", type=int, default=8)
     args = p.parse_args(argv)

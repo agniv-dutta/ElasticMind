@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover
     boto3 = None  # type: ignore[assignment]
 
 from loadgen.runner import run_load
+from backend.app.core.config import Settings
 
 NAMESPACE = "ElasticMind"
 
@@ -55,6 +56,7 @@ def _cw_series(cw, metric: str, minutes: int, region: str, period: int = 60) -> 
 
 
 async def _run(args) -> dict:
+    settings = Settings()
     if boto3 is None:
         raise SystemExit("boto3 is required for experiments.aws_run")
     ecs = boto3.client("ecs", region_name=args.region)
@@ -76,19 +78,19 @@ async def _run(args) -> dict:
                 desired_samples.append((time.time(), _ecs_desired(ecs, args.cluster, args.service)))
             except Exception:
                 pass
-            await asyncio.sleep(args.poll_interval)
+            await asyncio.sleep(settings.scaled_delay(args.poll_interval))
 
     stop = [False]
     poll_task = asyncio.create_task(poll())
     summary = await run_load(
         target_url=target_url,
-        speed_factor=args.speed_factor,
+        speed_factor=args.speed_factor if args.speed_factor is not None else settings.TIME_SCALE,
         max_requests=args.max_requests,
         concurrency=args.concurrency,
         profile=args.profile,
     )
     # keep watching the desired count until the duration elapses
-    await asyncio.sleep(max(0.0, args.duration - summary["duration_s"]))
+    await asyncio.sleep(max(0.0, settings.scaled_delay(args.duration) - summary["duration_s"]))
     stop[0] = True
     await poll_task
 
@@ -130,13 +132,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--cluster", default="elasticmind")
     p.add_argument("--service", default="elasticmind-target")
     p.add_argument("--profile", default="diurnal")
-    p.add_argument("--speed-factor", type=float, default=20.0)
+    p.add_argument("--speed-factor", type=float, default=None)
     p.add_argument("--max-requests", type=int, default=600)
     p.add_argument("--concurrency", type=int, default=16)
     p.add_argument("--duration", type=float, default=120.0, help="total wall-clock seconds to observe")
-    p.add_argument("--poll-interval", type=float, default=5.0)
+    p.add_argument("--poll-interval", type=float, default=None)
     p.add_argument("--observations-min", type=int, default=10)
     args = p.parse_args(argv)
+    settings = Settings()
+    args.poll_interval = args.poll_interval or settings.CONTROL_INTERVAL_S
 
     report = asyncio.run(_run(args))
     print(json.dumps(report, indent=2))

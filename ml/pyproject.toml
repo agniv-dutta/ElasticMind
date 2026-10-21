@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "elasticmind-ml"
 version = "0.1.0"
 description = "ElasticMind ML module: workload data, features, predictors, evaluation"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",

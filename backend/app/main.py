@@ -60,13 +60,13 @@ engine = get_engine(settings.db_url)
 init_db(engine)
 SessionLocal = get_session_factory(engine)
 audit_log = AuditLog()
-actuator_limiter = RateLimiter(rate_per_sec=1 / 30)
+actuator_limiter = RateLimiter(rate_per_sec=1 / max(settings.scaled_delay(settings.COOLDOWN_UP_S), 1e-6))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.metrics_pub = None
-    if settings.actuator == "aws":
+    if settings.ACTUATOR == "aws":
         try:
             from backend.app.aws.metrics import CloudWatchMetricsPublisher
 
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             app.state.metrics_pub = None
     # Warm-load the model from S3 when running on AWS (best effort).
-    if settings.model_s3_uri and settings.actuator == "aws":
+    if settings.model_s3_uri and settings.ACTUATOR == "aws":
         try:
             from backend.app.aws.model_store import load_model_from_s3
 
@@ -106,8 +106,8 @@ def get_db():
 
 
 def _get_actuator():
-    cfg = AutoscalerConfig()
-    if settings.actuator == "aws":
+    cfg = AutoscalerConfig.from_settings(settings)
+    if settings.ACTUATOR == "aws":
         return AwsEcsActuator(
             cluster=settings.ecs_cluster,
             service=settings.ecs_service,
@@ -116,17 +116,31 @@ def _get_actuator():
             max_c=cfg.max_instances,
             scale_up_cooldown_s=cfg.fast_scale_up_cooldown_s,
             scale_down_cooldown_s=cfg.slow_scale_down_cooldown_s,
+            startup_delay_s=settings.scaled_delay(settings.STARTUP_DELAY_S),
+            drain_delay_s=settings.scaled_delay(settings.DRAIN_DELAY_S),
         )
-    return LocalSimActuator(initial=max(1, cfg.min_instances), min_c=cfg.min_instances, max_c=cfg.max_instances)
+    return LocalSimActuator(
+        initial=cfg.min_instances,
+        min_c=cfg.min_instances,
+        max_c=cfg.max_instances,
+        startup_delay_s=settings.scaled_delay(settings.STARTUP_DELAY_S),
+        drain_delay_s=settings.scaled_delay(settings.DRAIN_DELAY_S),
+    )
 
 
 def _get_loop():
-    return ControlLoop(AutoscalerConfig())
+    return ControlLoop(AutoscalerConfig.from_settings(settings))
 
 
 @app.get("/health")
 def health():
     return {"status": "ok", "env": settings.env}
+
+
+@app.get("/config")
+def active_config():
+    """Return the effective shared configuration (YAML plus environment overrides)."""
+    return settings.model_dump()
 
 
 @app.get("/robustness/status")
@@ -184,7 +198,7 @@ def explain():
         history = generate_workload(profile="diurnal", days=1, seed=42)[
             ["timestamp", "requests"]
         ].tail(480)
-        horizon = min(settings.horizon_min, max(model.horizons))
+        horizon = min(settings.FORECAST_HORIZON_MIN, max(model.horizons))
         if hasattr(model, "explain"):
             return {"horizon_min": horizon, "features": model.explain(history, horizon)}
     except Exception as exc:
@@ -194,7 +208,7 @@ def explain():
 
 @app.get("/capacity", response_model=CapacityResponse)
 def capacity():
-    cfg = AutoscalerConfig()
+    cfg = AutoscalerConfig.from_settings(settings)
     # Use the same actuator instance that the control loop uses for consistency
     robust = getattr(app.state, "robust", None)
     if robust and hasattr(robust, "_loop"):
@@ -268,7 +282,7 @@ def receive_metrics(data: dict):
 @app.get("/metrics/current")
 def metrics_current():
     act = _get_actuator()
-    cfg = AutoscalerConfig()
+    cfg = AutoscalerConfig.from_settings(settings)
     now = datetime.now(UTC)
     current = act.current()
     
@@ -372,7 +386,7 @@ def cost_choose(
 ):
     if max_instances < min_instances:
         raise HTTPException(status_code=400, detail="max_instances must be >= min_instances")
-    cfg = AutoscalerConfig()
+    cfg = AutoscalerConfig.from_settings(settings)
     decision = choose_from_forecast(
         forecast_p90,
         cfg.capacity_per_instance,
@@ -416,19 +430,23 @@ async def control_loop_worker(app: FastAPI):
     """
     from backend.app.robustness.safeguards import SafeguardedController
 
-    cfg = AutoscalerConfig()
-    robust = SafeguardedController(cfg=cfg, base_headroom=cfg.headroom)
+    cfg = AutoscalerConfig.from_settings(settings)
+    robust = SafeguardedController(
+        cfg=cfg,
+        base_headroom=cfg.headroom,
+        trigger_utilization=settings.SAFETY_UTILIZATION_THRESHOLD,
+    )
     app.state.robust = robust
     act = _get_actuator()
     prev_pred: float | None = None
     try:
         while True:
-            await asyncio.sleep(settings.loop_interval_s)
+            await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
             try:
                 hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
                 model = load_predictor(settings.model_path)
                 fc = model.predict(hist.tail(480))
-                h = min(settings.horizon_min, max(model.horizons))
+                h = min(settings.FORECAST_HORIZON_MIN, max(model.horizons))
                 p50, p90 = fc.latest(h)
 
                 # Use live metrics from loadgen if available, otherwise synthetic baseline

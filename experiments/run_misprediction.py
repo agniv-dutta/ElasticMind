@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from backend.app.autoscaler.config import AutoscalerConfig
+from backend.app.core.config import Settings
 from backend.app.robustness.safeguards import SafeguardedController
 from backend.app.simulator.simulator import SimConfig, WorkloadReplaySimulator, summarize_simulation
 from ml.data.generate import generate_workload
@@ -55,8 +56,9 @@ def run_scenario(
     trace: pd.DataFrame,
     cfg: AutoscalerConfig | None = None,
 ) -> dict:
-    cfg = cfg or AutoscalerConfig()
-    sim_cfg = SimConfig(provisioning_delay_s=90.0)
+    settings = Settings()
+    cfg = cfg or AutoscalerConfig.from_settings(settings)
+    sim_cfg = SimConfig.from_settings(settings)
 
     if safeguards:
         ctl = SafeguardedController(cfg=cfg, base_headroom=cfg.headroom)

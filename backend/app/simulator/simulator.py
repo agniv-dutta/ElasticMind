@@ -6,20 +6,33 @@ approximation (M/M/c style) to avoid heavy external libraries.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from backend.app.core.config import Settings
 
 
 @dataclass
 class SimConfig:
-    provisioning_delay_s: float = 90.0  # delay to become effective (60–120 s per prompt)
-    service_rate: float = 100.0  # requests per instance per minute (simulated, = capacity_per_instance)
-    cost_per_instance_hour: float = 0.011  # USD per instance-hour (example)
-    power_idle_w: float = 10.0  # idle power (simulated)
-    power_max_w: float = 100.0  # power at 100% util (simulated)
+    provisioning_delay_s: float = field(default_factory=lambda: Settings().scaled_delay(Settings().STARTUP_DELAY_S))
+    service_rate: float = field(default_factory=lambda: Settings().CAPACITY_PER_REPLICA_RPM)
+    cost_per_instance_hour: float = field(default_factory=lambda: Settings().PRICE_PER_REPLICA_HOUR)
+    power_idle_w: float = field(default_factory=lambda: Settings().IDLE_WATTS)
+    power_max_w: float = field(default_factory=lambda: Settings().PEAK_WATTS)
     co2_kg_per_kwh: float = 0.417  # carbon intensity (simulated)
+    sla_latency_ms: float = field(default_factory=lambda: Settings().SLA_LATENCY_MS)
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> SimConfig:
+        return cls(
+            provisioning_delay_s=settings.scaled_delay(settings.STARTUP_DELAY_S),
+            service_rate=settings.CAPACITY_PER_REPLICA_RPM,
+            cost_per_instance_hour=settings.PRICE_PER_REPLICA_HOUR,
+            power_idle_w=settings.IDLE_WATTS,
+            power_max_w=settings.PEAK_WATTS,
+            sla_latency_ms=settings.SLA_LATENCY_MS,
+        )
 
 
 class WorkloadReplaySimulator:
@@ -47,7 +60,7 @@ class WorkloadReplaySimulator:
         # Capacity lags: effective capacity becomes active after provision delay.
         # Approximate as a delay of 1–2 steps in 1-min simulation by delaying
         # application by ``delay_steps = ceil(provision_delay_s / 60)``.
-        delay_steps = int(np.ceil(getattr(self.cfg, "provisioning_delay_s", getattr(self.cfg, "provision_delay_s", 90.0)) / 60.0))
+        delay_steps = int(np.ceil(getattr(self.cfg, "provisioning_delay_s", Settings().scaled_delay(Settings().STARTUP_DELAY_S)) / 60.0))
         desired_hist = []
         for i, row in d.iterrows():
             try:
@@ -70,7 +83,6 @@ class WorkloadReplaySimulator:
         util = np.where(total_capacity > 0, demand / total_capacity, 0.0)
         util = np.clip(util, 0.0, 5.0)  # cap (severe overload)
 
-        sla_violations = (demand > total_capacity).astype(int)
 
         # Simple M/M/c approximation: lambda = demand, mu = service_rate, c = effective
         # P0 not computed exactly; use a rough delay: delay ~ avg_queue + 1/mu
@@ -82,6 +94,7 @@ class WorkloadReplaySimulator:
         waiting_factor = np.where(denom > 1e-3, rho / denom, 1e3)
         sim_latency = (1.0 / self.cfg.service_rate) * (1.0 + waiting_factor / (effective + 1e-6))
         sim_latency = np.maximum(sim_latency, 1.0)  # ms-like in our units, but we report arbitrary; label simulated
+        sla_violations = ((demand > total_capacity) | (sim_latency > self.cfg.sla_latency_ms)).astype(int)
 
         hours_per_min = 1.0 / 60.0
         instance_hours = effective * hours_per_min
