@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from backend.app.core.config import Settings
+from backend.app.metrics.calculator import calculate_metrics
 
 
 @dataclass
@@ -80,28 +81,21 @@ class WorkloadReplaySimulator:
 
         # Metrics (simulated)
         total_capacity = effective * self.cfg.service_rate  # req/min total
-        util = np.where(total_capacity > 0, demand / total_capacity, 0.0)
-        util = np.clip(util, 0.0, 5.0)  # cap (severe overload)
-
-
-        # Simple M/M/c approximation: lambda = demand, mu = service_rate, c = effective
-        # P0 not computed exactly; use a rough delay: delay ~ avg_queue + 1/mu
-        # Avoid division by tiny numbers.
-        rho = np.where(effective > 0, demand / (effective * self.cfg.service_rate), 0.0)
-        rho = np.clip(rho, 0.0, 0.999)
-        # Erlang B-like rough heuristic; for the assignment this is a documented approximation
-        denom = 1.0 - rho
-        waiting_factor = np.where(denom > 1e-3, rho / denom, 1e3)
-        sim_latency = (1.0 / self.cfg.service_rate) * (1.0 + waiting_factor / (effective + 1e-6))
-        sim_latency = np.maximum(sim_latency, 1.0)  # ms-like in our units, but we report arbitrary; label simulated
-        sla_violations = ((demand > total_capacity) | (sim_latency > self.cfg.sla_latency_ms)).astype(int)
-
-        hours_per_min = 1.0 / 60.0
-        instance_hours = effective * hours_per_min
-        cost = instance_hours * self.cfg.cost_per_instance_hour
-
-        power = self.cfg.power_idle_w + util * (self.cfg.power_max_w - self.cfg.power_idle_w)
-        energy_kwh = power * hours_per_min / 1000.0
+        rows = [calculate_metrics(
+            demand=float(load), served_load=float(load), running_replicas=float(replicas),
+            capacity_per_replica=self.cfg.service_rate, service_rate=self.cfg.service_rate,
+            latency_sla_ms=self.cfg.sla_latency_ms,
+            billed_replica_seconds=max(float(replicas), float(desired_count)) * 60.0,
+            billed_replica_count=max(float(replicas), float(desired_count)),
+            price_per_second=self.cfg.cost_per_instance_hour / 3600.0,
+            dt_seconds=60.0, idle_w=self.cfg.power_idle_w, peak_w=self.cfg.power_max_w,
+        ) for load, replicas, desired_count in zip(demand, effective, desired)]
+        util = np.array([m.utilization for m in rows])
+        sim_latency = np.array([m.latency_ms for m in rows])
+        sla_violations = np.array([m.sla_violations for m in rows])
+        instance_hours = np.maximum(effective, desired) / 60.0
+        cost = np.array([m.cost_usd for m in rows])
+        energy_kwh = np.array([m.energy_kwh_estimated for m in rows])
         co2_kg = energy_kwh * self.cfg.co2_kg_per_kwh
 
         out = d[["timestamp"]].copy()
@@ -109,7 +103,7 @@ class WorkloadReplaySimulator:
         out["desired_instances"] = desired
         out["effective_instances"] = effective
         out["total_capacity_req_min"] = total_capacity
-        out["utilization"] = np.clip(util, 0.0, 2.0)
+        out["utilization"] = util
         out["sla_violation"] = sla_violations
         out["sim_latency_ms"] = np.round(sim_latency, 2)
         out["instance_hours"] = instance_hours

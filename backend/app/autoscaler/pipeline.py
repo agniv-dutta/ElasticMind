@@ -103,6 +103,7 @@ class ControlPipeline:
                 self.loop.state.last_scale_ts = now if now is not None else self.loop._now()
                 self.loop.state.last_reason = reason
                 self.loop.state.in_cooldown = True
+                cooldown_state = "active (safety override)"
         elif self.settings.policy == "static":
             source = "static"
             final = self.static.compute_desired(
@@ -124,10 +125,16 @@ class ControlPipeline:
             )
             final = controlled.desired
             reason = f"ML forecast selected {ml_candidate} replicas. {controlled.reason}"
-            if "cooldown" in controlled.reason:
-                cooldown_state = controlled.reason
-            elif self.loop.state.in_cooldown:
-                cooldown_state = "active"
+            if self.loop.state.last_scale_ts > 0:
+                scale_up = final > current or (final == current and ml_candidate > current)
+                duration = (
+                    self.cfg.fast_scale_up_cooldown_s
+                    if scale_up
+                    else self.cfg.slow_scale_down_cooldown_s
+                )
+                elapsed = (now if now is not None else self.loop._now()) - self.loop.state.last_scale_ts
+                if elapsed < duration:
+                    cooldown_state = f"active ({max(0.0, duration - elapsed):.1f}s remaining)"
         self.loop.state.in_cooldown = cooldown_state != "inactive"
         return ControlTick(
             observed_load=float(observed_load),

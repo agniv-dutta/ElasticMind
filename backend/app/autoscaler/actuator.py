@@ -39,7 +39,8 @@ class LocalSimActuator(CapacityActuator):
     """
 
     def __init__(self, initial: int | None = None, min_c: int | None = None, max_c: int | None = None,
-                 startup_delay_s: float | None = None, drain_delay_s: float | None = None) -> None:
+                 startup_delay_s: float | None = None, drain_delay_s: float | None = None,
+                 delay_s: float | None = None) -> None:
         settings = Settings()
         min_c = settings.MIN_REPLICAS if min_c is None else min_c
         max_c = settings.MAX_REPLICAS if max_c is None else max_c
@@ -49,6 +50,8 @@ class LocalSimActuator(CapacityActuator):
         self._max = max_c
         self._startup_delay = settings.scaled_delay(settings.STARTUP_DELAY_S) if startup_delay_s is None else startup_delay_s
         self._drain_delay = settings.scaled_delay(settings.DRAIN_DELAY_S) if drain_delay_s is None else drain_delay_s
+        if delay_s is not None:
+            self._startup_delay = self._drain_delay = delay_s
         self._last_action_ts: float | None = None
 
     def desired(self) -> int:
@@ -57,7 +60,7 @@ class LocalSimActuator(CapacityActuator):
     def current(self) -> int:
         return self._current
 
-    def set_desired(self, desired: int) -> ScalingAction:
+    def set_desired(self, desired: int, force: bool = False) -> ScalingAction:
         d = max(self._min, min(self._max, int(desired)))
         action = ScalingAction(desired=d, current=self._current, reason="actuator_set", ts=time())
         self._last_action_ts = action.ts

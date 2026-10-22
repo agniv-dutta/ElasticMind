@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import math
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +15,7 @@ from backend.app.autoscaler.actuator import LocalSimActuator
 from backend.app.autoscaler.aws_actuator import AwsEcsActuator
 from backend.app.autoscaler.config import AutoscalerConfig
 from backend.app.autoscaler.control import ControlLoop
+from backend.app.autoscaler.pipeline import ControlPipeline
 from backend.app.carbon.carbon import carbon_aware_window, intensity_now
 from backend.app.core.config import Settings
 from backend.app.cost.cost_aware_policy import choose_from_forecast
@@ -25,6 +28,7 @@ from backend.app.db.models import (
     get_session_factory,
     init_db,
 )
+from backend.app.metrics.calculator import calculate_metrics
 from backend.app.reliability.audit import AuditLog
 from backend.app.reliability.ratelimit import RateLimiter
 from backend.app.schemas.schemas import (
@@ -54,6 +58,7 @@ class LiveMetrics:
         self.request_count = 0
 
 live_metrics = LiveMetrics()
+logger = logging.getLogger("elasticmind.control")
 
 settings = Settings()
 engine = get_engine(settings.db_url)
@@ -148,13 +153,19 @@ def robustness_status():
     """Current safeguard state (drift alarm, fallback mode, rolling MAPE)."""
     worker = getattr(app.state, "robust", None)
     if worker is None:
-        return {"active_mode": settings.policy, "drift_alarm": False, "rolling_mape": 0.0}
+        return {
+            "active_mode": settings.policy,
+            "drift_alarm": False,
+            "rolling_mape": 0.0,
+            "forecast_fallback": getattr(app.state, "forecast_fallback", None),
+        }
     return {
         "active_mode": worker.state.active_mode,
         "drift_alarm": worker.state.drift_alarm,
         "rolling_mape": worker.state.rolling_mape,
         "headroom_mult": worker.state.headroom_mult,
         "recoveries": worker.state.recoveries,
+        "forecast_fallback": getattr(app.state, "forecast_fallback", None),
     }
 
 
@@ -290,19 +301,32 @@ def metrics_current():
     if live_metrics.request_count > 0:
         # Calculate utilization based on requests per minute vs capacity
         rpm = live_metrics.requests_per_min
-        capacity = current * cfg.capacity_per_instance
-        util = min(rpm / max(capacity, 1.0), 1.0)
+        util = None
         latency_ms = live_metrics.latency_p50_ms
-        # If latency exceeds threshold, count as SLA violation
-        sla_count = 1 if latency_ms > 500 else 0
+        metric_source = "measured"
     else:
         # Fallback to synthetic baseline when no loadgen data
-        util = 0.0
+        util = None
         latency_ms = 0.0
         sla_count = 0
+        metric_source = "simulated"
     
-    cost_usd = current * (cfg.capacity_per_instance * 0.0001)  # simulated
-    energy_kwh = current * 0.05  # simulated
+    metric_values = calculate_metrics(
+        demand=live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0,
+        served_load=live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0,
+        running_replicas=current, capacity_per_replica=cfg.capacity_per_instance,
+        service_rate=cfg.capacity_per_instance, latency_sla_ms=settings.SLA_LATENCY_MS,
+        billed_replica_seconds=current * settings.CONTROL_INTERVAL_S,
+        price_per_second=settings.PRICE_PER_REPLICA_HOUR / 3600.0,
+        dt_seconds=settings.CONTROL_INTERVAL_S, idle_w=settings.IDLE_WATTS,
+        peak_w=settings.PEAK_WATTS,
+        measured_latency_ms=latency_ms if live_metrics.request_count > 0 else None,
+    )
+    util = metric_values.utilization
+    latency_ms = metric_values.latency_ms
+    sla_count = metric_values.sla_violations
+    cost_usd = metric_values.cost_usd
+    energy_kwh = metric_values.energy_kwh_estimated
     return MetricsResponse(
         current_utilization=util,
         latency_ms=latency_ms,
@@ -310,6 +334,10 @@ def metrics_current():
         energy_kwh=energy_kwh,
         sla_count=sla_count,
         timestamp=now,
+        provenance={"utilization": metric_source, "sla_count": metric_source,
+                    "latency_ms": metric_source, "cost_usd": "simulated",
+                    "energy_kwh": "simulated"},
+        energy_label="estimated",
     )
 
 
@@ -326,7 +354,12 @@ def metrics_history(from_ts: datetime | None = Query(None), to_ts: datetime | No
 @app.get("/decisions")
 def decisions(db: Session = Depends(get_db)):
     q = db.query(Decision).order_by(desc(Decision.timestamp)).limit(200)
-    return [d.__dict__ for d in q]
+    fields = (
+        "observed_load", "forecast_p50", "forecast_p90", "horizon", "model_version",
+        "desired_ml", "desired_reactive", "final_desired", "decision_source", "reason",
+        "cooldown_state", "timestamp",
+    )
+    return [{key: getattr(row, key) for key in fields} for row in q]
 
 
 @app.get("/experiments")
@@ -423,97 +456,130 @@ def audit():
 
 
 async def control_loop_worker(app: FastAPI):
-    """Background control loop: forecast → policy → actuator, logged to SQLite.
-
-    Uses the safeguarded controller so the reactive safety net / drift fallback
-    apply when the forecast is wrong. Uses live metrics from loadgen when available.
-    """
-    from backend.app.robustness.safeguards import SafeguardedController
-
+    """Run forecast → candidate generation → source selection → action → persistence."""
     cfg = AutoscalerConfig.from_settings(settings)
-    robust = SafeguardedController(
-        cfg=cfg,
-        base_headroom=cfg.headroom,
-        trigger_utilization=settings.SAFETY_UTILIZATION_THRESHOLD,
-    )
-    app.state.robust = robust
+    loop = ControlLoop(cfg)
+    pipeline = ControlPipeline(settings, cfg, loop)
+    app.state.pipeline = pipeline
     act = _get_actuator()
-    prev_pred: float | None = None
     try:
         while True:
             await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
             try:
                 hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
-                model = load_predictor(settings.model_path)
-                fc = model.predict(hist.tail(480))
-                h = min(settings.FORECAST_HORIZON_MIN, max(model.horizons))
-                p50, p90 = fc.latest(h)
-
-                # Use live metrics from loadgen if available, otherwise synthetic baseline
-                if live_metrics.request_count > 0:
-                    actual = live_metrics.requests_per_min
-                else:
-                    actual = float(hist["requests"].iloc[-1])
-                
-                # Observe forecast error
-                if prev_pred is not None:
-                    robust.observe(prev_pred, actual)
-                prev_pred = p50
-
-                cap = robust._loop.state.current_instances * cfg.capacity_per_instance
-                util_now = actual / max(cap, 1e-6)
-                dec = robust.step(
-                    predicted_load_p50=p50,
-                    predicted_load_p90=p90,
-                    current_capacity=cap,
-                    current_utilization=util_now,
-                    current_instances=act.current(),
-                    now=asyncio.get_event_loop().time(),
+                actual = (
+                    live_metrics.requests_per_min
+                    if live_metrics.request_count > 0
+                    else float(hist["requests"].iloc[-1])
                 )
-                if actuator_limiter.allow():
-                    act.set_desired(dec.desired)
-                    # Update the control loop state to match the actuator
-                    robust._loop.state.current_instances = dec.desired
-                    audit_log.record(dec.desired, dec.current, dec.action, dec.reason)
+                current = act.current()
+                loop.state.current_instances = current
+                latency = live_metrics.latency_p95_ms if live_metrics.request_count > 0 else 0.0
+                utilization = calculate_metrics(
+                    demand=actual, served_load=actual, running_replicas=current,
+                    capacity_per_replica=cfg.capacity_per_instance,
+                    service_rate=cfg.capacity_per_instance,
+                    latency_sla_ms=settings.SLA_LATENCY_MS,
+                    billed_replica_seconds=current * settings.CONTROL_INTERVAL_S,
+                    price_per_second=settings.PRICE_PER_REPLICA_HOUR / 3600.0,
+                    dt_seconds=settings.CONTROL_INTERVAL_S,
+                    idle_w=settings.IDLE_WATTS, peak_w=settings.PEAK_WATTS,
+                    measured_latency_ms=latency if live_metrics.request_count > 0 else None,
+                ).utilization
+                p50 = p90 = None
+                horizon = settings.FORECAST_HORIZON_MIN
+                model_version = None
+                failure = None
+                try:
+                    model = load_predictor(settings.model_path)
+                    horizon = min(horizon, max(model.horizons))
+                    forecast = model.predict(hist.tail(480))
+                    p50, p90 = map(float, forecast.latest(horizon))
+                    model_version = str(getattr(model, "version", type(model).__name__))
+                    if not (math.isfinite(p50) and math.isfinite(p90)):
+                        raise ValueError("model returned non-finite forecast values")
+                    if getattr(app.state, "forecast_fallback", None):
+                        logger.info("Forecast recovered; returning to ML-led control")
+                    app.state.forecast_fallback = None
+                except Exception as exc:
+                    failure = f"{type(exc).__name__}: {exc}"
+                    app.state.forecast_fallback = failure
+                    logger.exception("FORECAST FAILURE: using reactive fallback for this control tick")
+
+                tick = pipeline.tick(
+                    observed_load=actual,
+                    utilization=utilization,
+                    latency_ms=latency,
+                    forecast_p50=p50,
+                    forecast_p90=p90,
+                    horizon=horizon,
+                    model_version=model_version,
+                    fallback_reason=failure,
+                    now=asyncio.get_running_loop().time(),
+                )
+                final = tick.final_desired
+                # Commit the tick before downstream actuator/metrics work so every
+                # completed decision remains inspectable even if an integration fails.
+                with SessionLocal() as db:
+                    db.add(Decision(
+                        timestamp=tick.timestamp.replace(tzinfo=None),
+                        desired=tick.final_desired,
+                        current=current,
+                        action="scale_up" if final > current else "scale_down" if final < current else "no_change",
+                        reason=tick.reason,
+                        p50=tick.forecast_p50,
+                        p90=tick.forecast_p90,
+                        observed_load=tick.observed_load,
+                        forecast_p50=tick.forecast_p50,
+                        forecast_p90=tick.forecast_p90,
+                        horizon=tick.horizon,
+                        model_version=tick.model_version,
+                        desired_ml=tick.desired_ml,
+                        desired_reactive=tick.desired_reactive,
+                        final_desired=tick.final_desired,
+                        decision_source=tick.decision_source,
+                        cooldown_state=tick.cooldown_state,
+                    ))
+                    db.commit()
+                safety_override = tick.decision_source == "safety_net"
+                if safety_override or actuator_limiter.allow():
+                    action = act.set_desired(final, force=safety_override)
+                    loop.state.current_instances = action.desired
+                    audit_log.record(action.desired, action.current, action.reason, tick.reason)
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
                     try:
                         running = act.current()
+                        calculated = calculate_metrics(
+                            demand=actual, served_load=actual, running_replicas=running,
+                            capacity_per_replica=cfg.capacity_per_instance,
+                            service_rate=cfg.capacity_per_instance,
+                            latency_sla_ms=settings.SLA_LATENCY_MS,
+                            billed_replica_seconds=max(running, final) * settings.CONTROL_INTERVAL_S,
+                            billed_replica_count=max(running, final),
+                            price_per_second=settings.PRICE_PER_REPLICA_HOUR / 3600.0,
+                            dt_seconds=settings.CONTROL_INTERVAL_S,
+                            idle_w=settings.IDLE_WATTS, peak_w=settings.PEAK_WATTS,
+                            measured_latency_ms=latency if live_metrics.request_count > 0 else None,
+                        )
                         pub.put_metrics(
-                            predicted_load=p50,
+                            predicted_load=p50 or 0.0,
                             actual_load=actual,
-                            desired_capacity=dec.desired,
+                            desired_capacity=final,
                             running_capacity=running,
-                            forecast_mape=robust.state.rolling_mape,
-                            sla_violations=0,
-                            estimated_cost=running * cfg.capacity_per_instance * 0.0001,
+                            forecast_mape=0.0,
+                            sla_violations=calculated.sla_violations,
+                            estimated_cost=calculated.cost_usd,
                         )
                     except Exception:
                         pass
                 with SessionLocal() as db:
-                    db.add(
-                        Decision(
-                            timestamp=datetime.utcnow(),
-                            desired=dec.desired,
-                            current=dec.current,
-                            action=dec.action,
-                            reason=dec.reason,
-                            p50=dec.p50,
-                            p90=dec.p90,
-                        )
-                    )
-                    db.add(
-                        Metric(
-                            timestamp=datetime.utcnow(),
-                            name="desired_instances",
-                            value=dec.desired,
-                        )
-                    )
+                    db.add(Metric(timestamp=datetime.utcnow(), name="desired_instances", value=final))
                     db.commit()
             except asyncio.CancelledError:
                 raise
             except Exception:
-                # keep the loop alive even if a single iteration fails
+                logger.exception("CONTROL TICK FAILED before persistence")
                 continue
     except asyncio.CancelledError:
         raise

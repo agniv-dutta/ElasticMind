@@ -1,8 +1,27 @@
 # ElasticMind Assumptions and Limitations (Simulated vs Measured)
 
-**All** computed numeric values in this local prototype are **simulated**. They
-are not measurements from a real cloud provider. Labelled throughout code and
-UI with the word **simulated** where presented.
+Metrics carry provenance: values computed from simulator inputs are labelled
+**simulated**; values received from the load generator or cloud telemetry are
+labelled **measured**. Local load-generator observations measure the test run,
+not production traffic. Energy is always labelled **estimated**.
+
+## Shared metric formulas
+
+`backend/app/metrics/calculator.py` is the only implementation of utilization,
+SLA violation, latency, cost, and energy calculations. API, simulator, and
+experiments must call it rather than reimplement these formulas.
+
+- **Utilization** = `served_load / (running_replicas x capacity_per_replica)`.
+  It may exceed 1 during overload; a zero running capacity yields zero.
+- **SLA violations**: one violation per interval if demand exceeds total
+  running capacity or latency exceeds `SLA_LATENCY_MS`.
+- **Latency**: measured latency when supplied by telemetry; otherwise the
+  simulator's documented M/M/c-style approximation.
+- **Cost** = `replica-seconds x price_per_second`. Starting and draining
+  replicas are billed during transitions.
+- **Energy (estimated)** = sum over replicas of
+  `(idle_w + (peak_w - idle_w) x util) x dt`, converted from joules to kWh.
+  The utilization for power interpolation is bounded to [0, 1].
 
 ## Workload and data
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from backend.app.metrics.calculator import cost_usd, sla_violations
 
 
 @dataclass
@@ -22,7 +23,8 @@ class CostAwareParams:
 def cost_estimate(
     instances: int, params: CostAwareParams, duration_hours: float = 1.0
 ) -> float:
-    return instances * params.instance_cost_usd_per_hour * duration_hours
+    replica_seconds = instances * duration_hours * 3600.0
+    return cost_usd(replica_seconds, params.instance_cost_usd_per_hour / 3600.0)
 
 
 def choose_min_cost(
@@ -60,6 +62,6 @@ def choose_from_forecast(
 
     def violations(instances: int) -> int:
         capacity = instances * capacity_per_instance
-        return int(max(0.0, forecast_p90 - capacity) > 0)
+        return sla_violations(forecast_p90, capacity, 0.0, float("inf"))
 
     return choose_min_cost(options, cost, violations, params.sla_penalty_usd_per_violation)

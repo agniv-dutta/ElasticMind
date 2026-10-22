@@ -46,6 +46,8 @@ export type Metrics = {
   energy_kwh: number
   sla_count: number
   timestamp: string
+  provenance: Record<string, 'measured' | 'simulated'>
+  energy_label: 'estimated'
 }
 
 export type Capacity = {

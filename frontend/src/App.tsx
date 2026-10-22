@@ -146,10 +146,11 @@ export default function App() {
               label="utilization"
               value={metrics ? (metrics.current_utilization * 100).toFixed(0) : '–'}
               unit="%"
+              simulated={metrics?.provenance.utilization !== 'measured'}
             />
-            <KpiCard label="latency" value={metrics ? metrics.latency_ms.toFixed(1) : '–'} unit="ms" />
-            <KpiCard label="running cost" value={metrics ? metrics.cost_usd.toFixed(3) : '–'} unit="USD" />
-            <KpiCard label="energy" value={metrics ? metrics.energy_kwh.toFixed(2) : '–'} unit="kWh" />
+            <KpiCard label="latency" value={metrics ? metrics.latency_ms.toFixed(1) : '–'} unit="ms"  simulated={metrics?.provenance.latency_ms !== 'measured'} />
+            <KpiCard label="running cost" value={metrics ? metrics.cost_usd.toFixed(3) : '–'} unit="USD"  simulated={metrics?.provenance.cost_usd !== 'measured'} />
+            <KpiCard label="energy (estimated)" value={metrics ? metrics.energy_kwh.toFixed(2) : '–'} unit="kWh" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
@@ -196,7 +197,7 @@ export default function App() {
                 </ResponsiveContainer>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                SLA violations: <span className="text-danger">{metrics?.sla_count ?? 0}</span>
+                SLA violations: <span className="text-danger">{metrics?.sla_count ?? 0}</span>{' '}{metrics && <SimBadge simulated={metrics.provenance.sla_count !== 'measured'} />}
               </p>
             </div>
           </div>

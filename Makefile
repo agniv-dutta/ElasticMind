@@ -49,3 +49,19 @@ smoke:
 
 smoke-ps:
 	powershell -ExecutionPolicy Bypass -File scripts/smoke_test.ps1
+
+
+doctor:
+	powershell -ExecutionPolicy Bypass -File scripts/doctor.ps1
+
+test-docker:
+	docker compose run --rm backend pytest -q
+
+test-venv:
+	python -c "import sys; assert sys.version_info[:2]==(3,11), sys.version"
+
+# Ensure 3.11
+check-py:
+	python -c "import sys; assert sys.version_info[:2]==(3,11), ('use python 3.11', sys.version)"
+
+

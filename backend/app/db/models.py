@@ -41,6 +41,16 @@ class Decision(Base):
     reason = Column(Text)
     p50 = Column(Float)
     p90 = Column(Float)
+    observed_load = Column(Float)
+    forecast_p50 = Column(Float)
+    forecast_p90 = Column(Float)
+    horizon = Column(Integer)
+    model_version = Column(String(128))
+    desired_ml = Column(Integer)
+    desired_reactive = Column(Integer)
+    final_desired = Column(Integer)
+    decision_source = Column(String(24))
+    cooldown_state = Column(String(128))
 
 
 class Experiment(Base):
@@ -63,6 +73,26 @@ def get_engine(db_url: str):
 
 def init_db(engine) -> None:
     Base.metadata.create_all(bind=engine)
+    # Upgrade existing local databases created before ControlTick fields existed.
+    from sqlalchemy import inspect, text
+
+    columns = {column["name"] for column in inspect(engine).get_columns("decisions")}
+    additions = {
+        "observed_load": "FLOAT",
+        "forecast_p50": "FLOAT",
+        "forecast_p90": "FLOAT",
+        "horizon": "INTEGER",
+        "model_version": "VARCHAR(128)",
+        "desired_ml": "INTEGER",
+        "desired_reactive": "INTEGER",
+        "final_desired": "INTEGER",
+        "decision_source": "VARCHAR(24)",
+        "cooldown_state": "VARCHAR(128)",
+    }
+    with engine.begin() as connection:
+        for name, sql_type in additions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE decisions ADD COLUMN {name} {sql_type}"))
 
 
 def get_session_factory(engine):

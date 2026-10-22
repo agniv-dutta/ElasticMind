@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from backend.app.metrics.calculator import cost_usd
 
 
 @dataclass
@@ -13,7 +14,7 @@ class CostAwareParams:
 
 
 def cost_estimate(instances: int, params: CostAwareParams, duration_hours: float = 1.0) -> float:
-    return instances * params.instance_cost_usd_per_hour * duration_hours
+    return cost_usd(instances * duration_hours * 3600.0, params.instance_cost_usd_per_hour / 3600.0)
 
 
 def pareto_frontier() -> list[dict]:

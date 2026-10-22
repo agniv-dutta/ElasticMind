@@ -89,11 +89,11 @@ class AwsEcsActuator(CapacityActuator):
         return True, ""
 
     # ----------------------------------------------------------------- action
-    def set_desired(self, desired: int, now: float | None = None) -> ScalingAction:
+    def set_desired(self, desired: int, now: float | None = None, force: bool = False) -> ScalingAction:
         """Update the ECS service desired count (clamped + rate limited)."""
         target = max(self._min, min(self._max, int(desired)))
         now = now if now is not None else time.time()
-        ok, why = self._cooldown_ok(target, now)
+        ok, why = (True, "") if force else self._cooldown_ok(target, now)
         if not ok and target != self._current:
             return ScalingAction(desired=self._current, current=self._current, reason=why, ts=now)
 

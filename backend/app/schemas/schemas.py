@@ -53,6 +53,8 @@ class MetricsResponse(BaseModel):
     energy_kwh: float = Field(..., description="simulated")
     sla_count: int = Field(..., description="simulated")
     timestamp: datetime
+    provenance: dict[str, str]
+    energy_label: str = "estimated"
 
 
 class HistoryQuery(BaseModel):
