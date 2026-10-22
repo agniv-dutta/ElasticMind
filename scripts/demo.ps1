@@ -8,14 +8,13 @@ $TargetUrl  = if ($env:TARGET_APP_URL) { $env:TARGET_APP_URL } else { "http://lo
 
 Write-Host "==> ElasticMind demo (all metrics simulated unless stated)"
 
-if (-not (Test-Path "ml/models/artifacts/lightgbm.joblib")) {
-    Write-Host "==> Model missing; generating data + training"
-    python -m ml.data.generate --profile diurnal --days 14 --out ml/data/generated/diurnal.parquet
-    python -m ml.train --data ml/data/generated/diurnal.parquet --stride 30 --max-points 25
+if (-not (Test-Path "ml/models/artifacts/lightgbm_local_demo.joblib")) {
+    Write-Host "==> Demo model missing; training from local_demo cycles"
+    python -m experiments.train_demo
 }
 
-Write-Host "==> Starting stack (backend, frontend, target_app)"
-docker compose up --build -d backend frontend target_app
+Write-Host "==> Starting stack (backend, gateway, frontend)"
+docker compose up --build -d backend gateway frontend
 
 Write-Host "==> Waiting for backend health..."
 for ($i = 0; $i -lt 30; $i++) {
@@ -23,9 +22,9 @@ for ($i = 0; $i -lt 30; $i++) {
     catch { Start-Sleep -Seconds 2 }
 }
 
-Write-Host "==> Running load generator against target app"
+Write-Host "==> Running load generator against gateway"
 python -m loadgen.runner --target-url $TargetUrl --backend-url $BackendUrl `
-    --profile diurnal --days 1 --speed-factor 20 --max-requests 300
+    --profile local_demo --days 1 --speed-factor 20
 
 Write-Host "==> Triggering misprediction scenarios"
 python -m experiments.run_misprediction

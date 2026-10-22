@@ -134,8 +134,7 @@ def _get_actuator():
         initial=cfg.min_instances,
         min_c=cfg.min_instances,
         max_c=cfg.max_instances,
-        startup_delay_s=settings.scaled_delay(settings.STARTUP_DELAY_S),
-        drain_delay_s=settings.scaled_delay(settings.DRAIN_DELAY_S),
+        delay_s=settings.scaled_delay(settings.STARTUP_DELAY_S),
     )
 
 
@@ -180,7 +179,7 @@ def robustness_status():
 def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
     req = req or PredictRequest()
     try:
-        model = load_predictor(settings.model_path)
+        model = load_predictor(settings.selected_model_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"model load failed: {e}") from e
 
@@ -211,7 +210,7 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
 def explain():
     """Return SHAP/feature explanations for the active forecast model."""
     try:
-        model = load_predictor(settings.model_path)
+        model = load_predictor(settings.selected_model_path)
         history = generate_workload(profile="diurnal", days=1, seed=42)[
             ["timestamp", "requests"]
         ].tail(480)
@@ -226,6 +225,16 @@ def explain():
 @app.get("/capacity", response_model=CapacityResponse)
 def capacity():
     cfg = AutoscalerConfig.from_settings(settings)
+    pipeline = getattr(app.state, "pipeline", None)
+    if live_metrics.request_count > 0:
+        current = live_metrics.running_replicas
+        desired = pipeline.loop.state.current_instances if pipeline else current
+        return {
+            "current_instances": current,
+            "desired_instances": desired,
+            "capacity_per_instance": cfg.capacity_per_instance,
+            "target_utilization": cfg.target_utilization,
+        }
     # Use the same actuator instance that the control loop uses for consistency
     robust = getattr(app.state, "robust", None)
     if robust and hasattr(robust, "_loop"):
@@ -494,7 +503,7 @@ async def control_loop_worker(app: FastAPI):
                 model_version = None
                 failure = None
                 try:
-                    model = load_predictor(settings.model_path)
+                    model = load_predictor(settings.selected_model_path)
                     horizon = min(horizon, max(model.horizons))
                     forecast = model.predict(hist.tail(480))
                     p50, p90 = map(float, forecast.latest(horizon))
@@ -550,14 +559,17 @@ async def control_loop_worker(app: FastAPI):
                     action = act.set_desired(final, force=safety_override)
                     loop.state.current_instances = action.desired
                     audit_log.record(action.desired, action.current, action.reason, tick.reason)
-                    try:
-                        async with httpx.AsyncClient(timeout=2.0) as client:
-                            await client.put(
-                                f"{settings.GATEWAY_URL.rstrip('/')}/replicas",
-                                json={"desired": action.desired},
-                            )
-                    except httpx.HTTPError:
-                        logger.exception("Failed to apply desired replica count to gateway")
+                gateway_replicas = (
+                    act.get_state().running if hasattr(act, "get_state") else act.current()
+                )
+                try:
+                    async with httpx.AsyncClient(timeout=2.0) as client:
+                        await client.put(
+                            f"{settings.GATEWAY_URL.rstrip('/')}/replicas",
+                            json={"desired": max(1, gateway_replicas)},
+                        )
+                except httpx.HTTPError:
+                    logger.exception("Failed to synchronize RUNNING replica count with gateway")
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
                     try:

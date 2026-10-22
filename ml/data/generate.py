@@ -20,6 +20,7 @@ class WorkloadProfile(StrEnum):
     STEADY = "steady"
     DIURNAL = "diurnal"
     SPICY = "spiky"
+    LOCAL_DEMO = "local_demo"
 
 
 @dataclass
@@ -89,6 +90,15 @@ def _profile_demand(profile: WorkloadProfile, n: int, cfg: GeneratorConfig) -> n
         burst_times = rng.choice(n, size=max(3, n // 400), replace=False)
         burst[burst_times] = rng.uniform(1.6, 3.0, size=len(burst_times))
         demand = base * daily * trend * burst
+    elif profile == WorkloadProfile.LOCAL_DEMO:
+        # A concise 45-minute autoscaling scenario with a clear ramp and plateau.
+        n = 45
+        t = np.arange(n)
+        demand = np.full(n, 240.0)
+        ramp = t <= 8
+        demand[ramp] = np.linspace(80.0, 360.0, ramp.sum())
+        demand[8:19] = 360.0
+        demand[19:30] = np.linspace(360.0, 240.0, 11)
     else:  # pragma: no cover - guarded by Enum
         raise ValueError(f"unknown profile: {profile}")
 
@@ -121,11 +131,14 @@ def generate_workload(
         events=list(events or []),
     )
 
-    n = int(days * 1440)
+    n = 45 if profile == WorkloadProfile.LOCAL_DEMO else int(days * 1440)
     rng = np.random.default_rng(seed)
     demand = _profile_demand(profile, n, cfg)
 
-    for ev in cfg.events:
+    selected_events = cfg.events
+    if profile == WorkloadProfile.LOCAL_DEMO and events is None:
+        selected_events = default_events(profile, days)
+    for ev in selected_events:
         demand = ev.apply(demand)
 
     noise = rng.normal(0.0, noise_frac, size=n)
@@ -145,7 +158,14 @@ def generate_workload(
 
 
 def default_events(profile: WorkloadProfile, days: int) -> list[WorkloadEvent]:
-    """Deterministic demo events for the ``spiky`` profile."""
+    """Deterministic injected events for the spiky and local demo profiles."""
+    if profile == WorkloadProfile.LOCAL_DEMO:
+        return [
+            WorkloadEvent("flash_spike", start_minute=19, duration_minutes=1, magnitude=3.0),
+            WorkloadEvent("flash_spike", start_minute=26, duration_minutes=1, magnitude=3.2),
+            WorkloadEvent("sudden_drop", start_minute=31, duration_minutes=4, magnitude=1.8),
+            WorkloadEvent("regime_shift", start_minute=38, duration_minutes=1, magnitude=1.4),
+        ]
     if profile != WorkloadProfile.SPICY:
         return []
     mid = days * 1440 // 2

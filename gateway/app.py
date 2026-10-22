@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import os
 import statistics
@@ -17,6 +18,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from backend.app.metrics.calculator import utilization
+
+
+def _cpu_burn(duration_ms: float) -> None:
+    """Burn CPU for the configured service time; hashlib releases the GIL on large blocks."""
+    deadline = time.perf_counter() + duration_ms / 1000.0
+    block = bytes(65536)
+    digest = b""
+    while time.perf_counter() < deadline:
+        digest = hashlib.sha256(block + digest).digest()
 
 
 @dataclass
@@ -88,9 +98,7 @@ class ReplicaPool:
         status = 200
         try:
             async with replica.semaphore:
-                # The configured CPU-burn duration models service time without
-                # blocking the gateway event loop, so independent replicas run concurrently.
-                await asyncio.sleep(self.cpu_burn_ms / 1000.0)
+                await asyncio.to_thread(_cpu_burn, self.cpu_burn_ms)
         except Exception:
             status = 500
         finally:

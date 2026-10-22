@@ -1,4 +1,4 @@
-.PHONY: setup test lint fmt run demo up down logs train smoke
+.PHONY: setup test lint fmt run demo up down logs train train-demo smoke
 
 PYTHON ?= python
 PIP ?= pip
@@ -25,6 +25,9 @@ fmt:
 train:
 	$(PYTHON) -m ml.data.generate --profile diurnal --days 14 --out ml/data/generated/diurnal.parquet
 	$(PYTHON) -m ml.train --data ml/data/generated/diurnal.parquet
+
+train-demo:
+	$(PYTHON) -m experiments.train_demo
 
 run:
 	docker compose up --build backend gateway

@@ -57,25 +57,34 @@ class LightGBMMultiHorizon(Predictor):
         n_estimators: int = 400,
         val_fraction: float = 0.15,
         seed: int = 42,
+        lags: tuple[int, ...] = (1, 2, 3, 5),
+        windows: tuple[int, ...] = (3, 5),
     ) -> None:
         super().__init__(horizons)
         self.params = dict(params or lgb_params or {})
         self.n_estimators = n_estimators
         self.val_fraction = val_fraction
         self.seed = seed
+        self.lags = tuple(lags)
+        self.windows = tuple(windows)
+        self.p90_offsets: dict[int, float] = {h: 0.0 for h in horizons}
         self.models_: dict[tuple[int, float], Any] = {}
         self.feature_names_: list[str] = []
 
     # ------------------------------------------------------------------ train
     def fit(self, history: pd.DataFrame) -> LightGBMMultiHorizon:
+        return self.fit_segments([history])
+
+    def fit_segments(self, histories: list[pd.DataFrame]) -> LightGBMMultiHorizon:
+        """Fit using independent traces, keeping feature windows within each trace."""
         if lgb is None:  # pragma: no cover
             raise ImportError(f"lightgbm required: {_IMPORT_ERROR}")
-        d = self._frame(history)
         self.feature_names_ = None  # type: ignore[assignment]
 
         for h in self.horizons:
-            sup = make_supervised(d, horizon=h)
-            if len(sup) < 200:
+            frames = [make_supervised(self._frame(d), horizon=h, lags=self.lags, windows=self.windows) for d in histories]
+            sup = pd.concat(frames, ignore_index=True)
+            if len(sup) < 20:
                 raise ValueError(f"not enough rows ({len(sup)}) to train horizon {h}")
             split = int(len(sup) * (1.0 - self.val_fraction))
             train, val = sup.iloc[:split], sup.iloc[split:]
@@ -84,6 +93,7 @@ class LightGBMMultiHorizon(Predictor):
 
             for q in QUANTILES:
                 model_params = _default_params(q, self.seed)
+                model_params["min_data_in_leaf"] = min(30, max(2, len(train) // 20))
                 model_params.update(self.params)
                 model_params["alpha"] = q
                 model = lgb.LGBMRegressor(n_estimators=self.n_estimators, **model_params)
@@ -103,7 +113,7 @@ class LightGBMMultiHorizon(Predictor):
     def predict(self, history: pd.DataFrame) -> ForecastResult:
         self._require_fitted()
         d = self._frame(history)
-        feat = build_features(d)
+        feat = build_features(d, lags=self.lags, windows=self.windows)
         if self.feature_names_ is None:  # pragma: no cover
             raise RuntimeError("feature names unavailable")
         missing = [c for c in self.feature_names_ if c not in feat.columns]
@@ -121,7 +131,7 @@ class LightGBMMultiHorizon(Predictor):
                     "timestamp": last_ts + pd.Timedelta(minutes=h),
                     "horizon_min": h,
                     "p50": max(p50, 0.0),
-                    "p90": max(p90, p50, 0.0),
+                    "p90": max(p90 + self.p90_offsets.get(h, 0.0), p50, 0.0),
                 }
             )
         return ForecastResult(pd.DataFrame(rows), model=self.name)
@@ -150,6 +160,9 @@ class LightGBMMultiHorizon(Predictor):
                 "params": self.params,
                 "n_estimators": self.n_estimators,
                 "quantiles": QUANTILES,
+                "lags": self.lags,
+                "windows": self.windows,
+                "p90_offsets": self.p90_offsets,
             },
             path,
         )
@@ -175,9 +188,12 @@ class LightGBMMultiHorizon(Predictor):
             horizons=tuple(blob["horizons"]),
             params=blob.get("params") or {},
             n_estimators=blob.get("n_estimators", 400),
+            lags=tuple(blob.get("lags", (1, 2, 3, 5, 10, 15, 30, 60))),
+            windows=tuple(blob.get("windows", (5, 15, 60))),
         )
         obj.models_ = blob["models"]
         obj.feature_names_ = blob["feature_names"]
+        obj.p90_offsets = blob.get("p90_offsets", {h: 0.0 for h in obj.horizons})
         obj.fitted_ = True
         return obj
 

@@ -100,12 +100,12 @@ class LocalReplicaPool(CapacityActuator):
     def apply_delay(self, action: ScalingAction) -> float:
         return self._delay
 
-    def set_desired(self, desired: int, now: float | None = None) -> ScalingAction:
+    def set_desired(self, desired: int, now: float | None = None, force: bool = False) -> ScalingAction:
         now = now if now is not None else time.time()
         target = max(self._min, min(self._max, int(desired)))
         self._tick(now)
         cur = self.current(now)
-        if self._last_action_ts is not None:
+        if self._last_action_ts is not None and not force:
             cd = self.scale_up_cooldown_s if target > cur else self.scale_down_cooldown_s
             if now - self._last_action_ts < cd and target != cur:
                 return ScalingAction(desired=self._desired, current=cur, reason="cooldown", ts=now)

@@ -77,6 +77,24 @@ def test_safety_net_does_not_fire_when_utilization_and_latency_are_below_thresho
     assert tick.decision_source == "ml"
 
 
+def test_gateway_error_rate_triggers_safety_net():
+    pipeline = make_pipeline()
+    tick = pipeline.tick(
+        observed_load=20,
+        utilization=0.2,
+        latency_ms=40,
+        error_rate=0.10,
+        forecast_p50=20,
+        forecast_p90=25,
+        horizon=15,
+        model_version="test-model",
+        now=1000,
+    )
+    assert tick.decision_source == "safety_net"
+    assert tick.final_desired > 1
+    assert "error rate 0.100" in tick.reason
+
+
 def test_missing_or_failed_forecast_uses_loudly_described_reactive_fallback():
     pipeline = make_pipeline()
     tick = pipeline.tick(

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     policy: str = "ml"
     headroom: float = 0.20
     hysteresis: float = 0.05
-    model_path: str = "ml/models/artifacts/lightgbm.joblib"
+    model_path: str | None = None
     aws_region: str = "us-east-1"
     ecs_cluster: str = "elasticmind"
     ecs_service: str = "elasticmind-target"
@@ -75,8 +75,39 @@ class Settings(BaseSettings):
         return seconds / self.TIME_SCALE
 
     @property
+    def selected_model_path(self) -> str:
+        """Resolve a model artifact from PROFILE, unless explicitly overridden."""
+        if self.model_path:
+            return self.model_path
+        if self.PROFILE in {"local_demo", "aws_demo"}:
+            return "ml/models/artifacts/lightgbm_local_demo.joblib"
+        return "ml/models/artifacts/lightgbm.joblib"
+
+    @property
     def db_path(self) -> Path:
         if self.db_url.startswith("sqlite:///"):
             p = self.db_url.replace("sqlite:///", "", 1)
             return Path(p if p else "backend/data/elasticmind.db")
         return Path("backend/data/elasticmind.db")
+
+
+def load_capacity_from_yaml(settings, path="configs/calibration.yaml"):
+    try:
+        import yaml
+        from pathlib import Path
+        p = Path(path)
+        if p.exists():
+            data = yaml.safe_load(p.read_text()) or {}
+            v = data.get("CAPACITY_PER_REPLICA_RPM")
+            if v is not None:
+                settings.capacity_per_instance = float(v)
+                if hasattr(settings, "CAPACITY_PER_REPLICA_RPM"):
+                    settings.CAPACITY_PER_REPLICA_RPM = float(v)
+    except Exception:
+        pass
+
+try:
+    load_capacity_from_yaml(Settings())
+except Exception:
+    pass
+

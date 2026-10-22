@@ -71,7 +71,7 @@ The settings fields are `PROFILE`, `TIME_SCALE`, `ACTUATOR`,
 
 ```bash
 python -m venv .venv && source .venv/Scripts/activate   # Windows
-pip install -e ./ml -e ./backend -e ./loadgen -e ./target_app
+pip install -e ./ml -e ./backend -e ./loadgen -e ./gateway -e ./target_app
 pip install pytest ruff black
 ```
 

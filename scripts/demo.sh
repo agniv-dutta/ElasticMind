@@ -12,14 +12,13 @@ TARGET_URL="${TARGET_APP_URL:-http://localhost:8001}"
 
 echo "==> ElasticMind demo (all metrics simulated unless stated)"
 
-if [ ! -f ml/models/artifacts/lightgbm.joblib ]; then
-  echo "==> Model missing; generating data + training"
-  python -m ml.data.generate --profile diurnal --days 14 --out ml/data/generated/diurnal.parquet
-  python -m ml.train --data ml/data/generated/diurnal.parquet --stride 30 --max-points 25
+if [ ! -f ml/models/artifacts/lightgbm_local_demo.joblib ]; then
+  echo "==> Demo model missing; training from local_demo cycles"
+  python -m experiments.train_demo
 fi
 
-echo "==> Starting stack (backend, frontend, target_app)"
-docker compose up --build -d backend frontend target_app
+echo "==> Starting stack (backend, gateway, frontend)"
+docker compose up --build -d backend gateway frontend
 
 echo "==> Waiting for backend health..."
 for i in $(seq 1 30); do
@@ -27,9 +26,9 @@ for i in $(seq 1 30); do
   sleep 2
 done
 
-echo "==> Running load generator against target app"
+echo "==> Running load generator against gateway"
 python -m loadgen.runner --target-url "$TARGET_URL" --backend-url "$BACKEND_URL" \
-  --profile diurnal --days 1 --speed-factor 20 --max-requests 300 || true
+  --profile local_demo --days 1 --speed-factor 20 || true
 
 echo "==> Triggering misprediction scenarios"
 python -m experiments.run_misprediction || true

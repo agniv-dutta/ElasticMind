@@ -102,7 +102,8 @@ def test_post_metrics_from_loadgen() -> None:
     resp = client.post("/metrics", json=loadgen_data)
     assert resp.status_code == 200
     assert resp.json()["status"] == "received"
-    assert resp.json()["simulated"] is True
+    assert resp.json()["source"] == "gateway"
+    assert resp.json()["measured"] is True
     
     # Verify live metrics were updated
     assert live_metrics.request_count == 300

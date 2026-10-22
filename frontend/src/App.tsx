@@ -1,376 +1,191 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from "react";
+import { api } from "./api";
 import {
   Area,
+  AreaChart,
   Bar,
+  BarChart,
   CartesianGrid,
-  ComposedChart,
+  Legend,
   Line,
+  LineChart,
+  ReferenceLine,
   ResponsiveContainer,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
-} from 'recharts'
-import {
-  api,
-  Capacity,
-  Decision,
-  ExperimentRow,
-  ForecastPoint,
-  Metrics,
-  ModelMetric,
-  ParetoPoint,
-} from './api'
+} from "recharts";
 
-const POLL_MS = 5000
+type ForecastPoint = { timestamp: string; horizon_min: number; p50: number; p90: number };
 
-function SimBadge({ simulated }: { simulated: boolean }) {
-  return simulated ? (
-    <span className="badge-sim">simulated</span>
-  ) : (
-    <span className="badge-meas">measured</span>
-  )
+function Badge({ kind }: { kind: "measured" | "simulated" | "estimated" }) {
+  const cls =
+    kind === "measured"
+      ? "bg-emerald-700"
+      : kind === "simulated"
+      ? "bg-amber-700"
+      : "bg-slate-600";
+  return <span className={`text-xs px-1.5 py-0.5 rounded text-white ${cls}`}>{kind}</span>;
 }
 
-function KpiCard({
-  label,
-  value,
-  unit,
-  simulated = true,
-}: {
-  label: string
-  value: string | number
-  unit?: string
-  simulated?: boolean
-}) {
-  return (
-    <div className="card">
-      <div className="flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wider text-slate-400">{label}</span>
-        <SimBadge simulated={simulated} />
-      </div>
-      <div className="kpi-value mt-2">
-        {value}
-        {unit && <span className="text-sm text-slate-400 ml-1">{unit}</span>}
-      </div>
-    </div>
-  )
+function DecisionBadge({ reason }: { reason: string }) {
+  const r = (reason || "").toLowerCase();
+  if (r.includes("safety_net")) return <span className="text-xs px-1.5 py-0.5 rounded bg-red-700 text-white">safety net</span>;
+  if (r.includes("fallback") || r.includes("reactive")) return <span className="text-xs px-1.5 py-0.5 rounded bg-orange-700 text-white">fallback</span>;
+  return <span className="text-xs px-1.5 py-0.5 rounded bg-blue-700 text-white">ML</span>;
 }
 
 export default function App() {
-  const [metrics, setMetrics] = useState<Metrics | null>(null)
-  const [capacity, setCapacity] = useState<Capacity | null>(null)
-  const [forecast, setForecast] = useState<ForecastPoint[]>([])
-  const [decisions, setDecisions] = useState<Decision[]>([])
-  const [experiments, setExperiments] = useState<ExperimentRow[]>([])
-  const [modelMetrics, setModelMetrics] = useState<ModelMetric[]>([])
-  const [pareto, setPareto] = useState<ParetoPoint[]>([])
-  const [policy, setPolicy] = useState<string>('ml')
-  const [page, setPage] = useState<'dashboard' | 'experiments'>('dashboard')
-  const [bias, setBias] = useState(0)
-  const [err, setErr] = useState<string | null>(null)
+  const [health, setHealth] = useState<any>(null);
+  const [cap, setCap] = useState<any>(null);
+  const [fc, setFc] = useState<any>(null);
+  const [mc, setMc] = useState<any>(null);
+  const [decisions, setDecisions] = useState<any[]>([]);
+  const [rob, setRob] = useState<any>(null);
+  const [policy, setPolicy] = useState("ml_predictive");
+  const [bias, setBias] = useState(0);
+  const [spike, setSpike] = useState(2);
+
+  const poll = async () => {
+    try {
+      const [h, c, f, m, d, r] = await Promise.all([
+        api.health().catch(() => null),
+        api.capacity().catch(() => null),
+        api.forecast().catch(() => null),
+        api.metricsCurrent().catch(() => null),
+        api.decisions().catch(() => []),
+        api.robustnessStatus().catch(() => null),
+      ]);
+      setHealth(h);
+      setCap(c);
+      setFc(f);
+      setMc(m);
+      setDecisions(Array.isArray(d) ? d : []);
+      setRob(r);
+    } catch (e) {
+      // ignore
+    }
+  };
 
   useEffect(() => {
-    let alive = true
-    const tick = async () => {
-      try {
-        const [m, c, f, d, e, mm, pf] = await Promise.all([
-          api.metrics(),
-          api.capacity(),
-          api.forecast(),
-          api.decisions(),
-          api.experiments(),
-          api.modelComparison(),
-          api.pareto(),
-        ])
-        if (!alive) return
-        setMetrics(m)
-        setCapacity(c)
-        setForecast(f.forecast)
-        setDecisions(d)
-        setExperiments(e)
-        setModelMetrics(mm)
-        setPareto(pf)
-        setErr(null)
-      } catch (e) {
-        if (alive) setErr(String(e))
-      }
-    }
-    tick()
-    const id = setInterval(tick, POLL_MS)
-    return () => {
-      alive = false
-      clearInterval(id)
-    }
-  }, [])
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
 
-  const chartData = forecast.map((f) => ({
-    t: new Date(f.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    p50: f.p50,
-    p90: f.p90,
-    band: f.p90 - f.p50,
-  }))
+  const forecastData = useMemo(() => {
+    const pts: ForecastPoint[] = fc?.forecast || [];
+    return pts.map((p) => ({ ...p, horizon_min: p.horizon_min }));
+  }, [fc]);
+
+  const replicaData = useMemo(() => {
+    const desired = cap?.desired_instances ?? cap?.desired ?? 0;
+    const running = cap?.current_instances ?? cap?.running ?? 0;
+    const starting = cap?.pending_start ?? 0;
+    const draining = cap?.draining ?? 0;
+    return [{ name: "replicas", desired, running, starting, draining }];
+  }, [cap]);
 
   return (
-    <div className="min-h-screen p-4 md:p-6 space-y-4">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-white">ElasticMind</h1>
-          <p className="text-xs text-slate-400">ML-driven cloud resource manager</p>
+    <div className="min-h-screen bg-slate-950 text-slate-100 p-4">
+      <header className="mb-4">
+        <h1 className="text-2xl font-bold">ElasticMind Dashboard</h1>
+        <div className="text-sm text-slate-400 flex flex-wrap gap-3">
+          <span>profile: {health?.profile || health?.env || "?"}</span>
+          <span>TIME_SCALE: {health?.time_scale ?? "?"}</span>
+          <span>ACTUATOR: {health?.actuator || "local"}</span>
+          <span>model version: {fc?.model || cap?.model_version || rob?.model_version || "?"}</span>
         </div>
-        <nav className="flex gap-2">
-          <button
-            className={`px-3 py-1.5 rounded text-sm ${page === 'dashboard' ? 'bg-accent text-ink' : 'bg-panel text-slate-300'}`}
-            onClick={() => setPage('dashboard')}
-          >
-            Dashboard
-          </button>
-          <button
-            className={`px-3 py-1.5 rounded text-sm ${page === 'experiments' ? 'bg-accent text-ink' : 'bg-panel text-slate-300'}`}
-            onClick={() => setPage('experiments')}
-          >
-            Compare experiments
-          </button>
-        </nav>
       </header>
 
-      {err && (
-        <div className="card border-danger/50 text-danger text-sm">backend unreachable: {err}</div>
-      )}
+      <section className="mb-4 bg-slate-900 rounded p-3 flex flex-wrap gap-2 items-center">
+        <span className="text-sm">Policy</span>
+        <select value={policy} onChange={(e) => setPolicy(e.target.value)} className="bg-slate-800 rounded px-2 py-1">
+          <option value="static">static</option>
+          <option value="reactive">reactive</option>
+          <option value="ml_predictive">ML</option>
+        </select>
+        <button onClick={() => api.setPolicy(policy)} className="px-2 py-1 bg-blue-700 rounded">Apply</button>
+        <button onClick={() => api.start()} className="px-2 py-1 bg-emerald-700 rounded">Start</button>
+        <button onClick={() => api.stop()} className="px-2 py-1 bg-rose-700 rounded">Stop</button>
+        <span className="text-sm ml-4">Bias %</span>
+        <input type="number" value={bias} onChange={(e) => setBias(Number(e.target.value))} className="w-20 bg-slate-800 rounded px-2 py-1" />
+        <button onClick={() => api.bias(bias)} className="px-2 py-1 bg-amber-700 rounded">Inject bias</button>
+        <span className="text-sm">Spike x</span>
+        <input type="number" value={spike} onChange={(e) => setSpike(Number(e.target.value))} className="w-16 bg-slate-800 rounded px-2 py-1" />
+        <button onClick={() => api.spike(spike, 5)} className="px-2 py-1 bg-orange-700 rounded">Inject spike</button>
+      </section>
 
-      {page === 'dashboard' ? (
-        <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <KpiCard
-              label="utilization"
-              value={metrics ? (metrics.current_utilization * 100).toFixed(0) : '–'}
-              unit="%"
-              simulated={metrics?.provenance.utilization !== 'measured'}
-            />
-            <KpiCard label="latency" value={metrics ? metrics.latency_ms.toFixed(1) : '–'} unit="ms"  simulated={metrics?.provenance.latency_ms !== 'measured'} />
-            <KpiCard label="running cost" value={metrics ? metrics.cost_usd.toFixed(3) : '–'} unit="USD"  simulated={metrics?.provenance.cost_usd !== 'measured'} />
-            <KpiCard label="energy (estimated)" value={metrics ? metrics.energy_kwh.toFixed(2) : '–'} unit="kWh" />
-          </div>
+      <section className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="bg-slate-900 rounded p-3">
+          <h2 className="mb-2">Replicas: desired vs running vs starting vs draining</h2>
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={replicaData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="name" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Bar dataKey="desired" stackId="a" fill="#60a5fa" />
+              <Bar dataKey="running" stackId="a" fill="#22c55e" />
+              <Bar dataKey="starting" stackId="a" fill="#f59e0b" />
+              <Bar dataKey="draining" stackId="a" fill="#f43f5e" />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="bg-slate-900 rounded p-3">
+          <h2 className="mb-2">Forecast P50/P90 vs actual (horizon shift applied)</h2>
+          <ResponsiveContainer width="100%" height={220}>
+            <AreaChart data={forecastData}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="horizon_min" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Area type="monotone" dataKey="p90" stackId="1" stroke="#f59e0b" fill="#f59e0b33" />
+              <Area type="monotone" dataKey="p50" stackId="2" stroke="#60a5fa" fill="#60a5fa33" />
+              <Line type="monotone" dataKey="actual" stroke="#22c55e" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-            <div className="card lg:col-span-2">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-white">
-                  Actual vs predicted load (P50/P90 band)
-                </h2>
-                <SimBadge simulated />
-              </div>
-              <div className="h-56 mt-2">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={chartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="t" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                    <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                    <Tooltip />
-                    <Area type="monotone" dataKey="p90" stroke="#fbbf24" fill="#fbbf2433" fillOpacity={0.3} />
-                    <Line type="monotone" dataKey="p50" stroke="#5eead4" dot={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
+      <section className="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">
+        <div className="bg-slate-900 rounded p-2">Util <Badge kind="simulated" /> {mc?.current_utilization ?? "-"}</div>
+        <div className="bg-slate-900 rounded p-2">Latency p50/p95 <Badge kind="measured" /> {mc?.latency_p50_ms ?? mc?.latency_ms ?? "-"} / {mc?.latency_p95_ms ?? "-"}</div>
+        <div className="bg-slate-900 rounded p-2">SLA <Badge kind="simulated" /> {mc?.sla_count ?? mc?.sla_violations ?? 0}</div>
+        <div className="bg-slate-900 rounded p-2">Cost <Badge kind="estimated" /> {mc?.cost_usd ?? "-"}</div>
+        <div className="bg-slate-900 rounded p-2">Energy <Badge kind="simulated" /> {mc?.energy_kwh ?? "-"}</div>
+        <div className="bg-slate-900 rounded p-2">Robust <span className="text-xs">{rob?.active_mode || "-"}</span></div>
+      </section>
 
-            <div className="card">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-white">Capacity</h2>
-                <SimBadge simulated />
-              </div>
-              <div className="h-56 mt-2">
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart
-                    data={[
-                      { name: 'current', v: capacity?.current_instances ?? 0 },
-                      { name: 'desired', v: capacity?.desired_instances ?? 0 },
-                    ]}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                    <YAxis allowDecimals={false} tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                    <Tooltip />
-                    <Bar dataKey="v" fill="#5eead4" />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
-              <p className="text-xs text-slate-400 mt-1">
-                SLA violations: <span className="text-danger">{metrics?.sla_count ?? 0}</span>{' '}{metrics && <SimBadge simulated={metrics.provenance.sla_count !== 'measured'} />}
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-            <div className="card">
-              <h2 className="text-sm font-semibold text-white mb-2">Controls</h2>
-              <div className="flex gap-2 mb-3">
-                {['static', 'reactive', 'ml'].map((p) => (
-                  <button
-                    key={p}
-                    className={`px-2.5 py-1 rounded text-xs ${policy === p ? 'bg-accent text-ink' : 'bg-slate-700 text-slate-200'}`}
-                    onClick={async () => {
-                      setPolicy(p)
-                      await api.policy(p)
-                    }}
-                  >
-                    {p}
-                  </button>
-                ))}
-              </div>
-              <div className="flex gap-2">
-                <button className="px-3 py-1.5 rounded bg-accent text-ink text-sm" onClick={() => api.start()}>
-                  Start
-                </button>
-                <button className="px-3 py-1.5 rounded bg-danger text-ink text-sm" onClick={() => api.stop()}>
-                  Stop
-                </button>
-              </div>
-            </div>
-
-            <div className="card">
-              <h2 className="text-sm font-semibold text-white mb-2">Fault injection</h2>
-              <label className="text-xs text-slate-400">Forecast bias</label>
-              <div className="flex items-center gap-2 mt-1 mb-3">
-                <input
-                  type="range"
-                  min={-50}
-                  max={50}
-                  value={bias}
-                  onChange={(e) => setBias(Number(e.target.value))}
-                  className="flex-1"
-                />
-                <span className="text-xs w-12 text-right">{bias > 0 ? `+${bias}` : bias}%</span>
-                <button
-                  className="px-2 py-1 rounded bg-warn text-ink text-xs"
-                  onClick={() => api.bias(bias)}
-                >
-                  Apply
-                </button>
-              </div>
-              <button
-                className="px-3 py-1.5 rounded bg-warn text-ink text-sm"
-                onClick={() => api.spike(3.0, 5)}
-              >
-                Inject spike (3x, 5 min)
-              </button>
-            </div>
-
-            <div className="card">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-white">Decision log</h2>
-                <SimBadge simulated />
-              </div>
-              <div className="max-h-40 overflow-y-auto mt-2 text-xs">
-                <table className="w-full">
-                  <thead className="text-slate-500">
-                    <tr>
-                      <th className="text-left">t</th>
-                      <th className="text-left">act</th>
-                      <th className="text-left">c→d</th>
-                      <th className="text-left">reason</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {decisions.slice(0, 20).map((d) => (
-                      <tr key={d.id} className="border-t border-slate-800">
-                        <td className="py-0.5">{new Date(d.timestamp).toLocaleTimeString()}</td>
-                        <td className={d.action === 'scale_up' ? 'text-accent' : d.action === 'scale_down' ? 'text-warn' : 'text-slate-500'}>
-                          {d.action}
-                        </td>
-                        <td>
-                          {d.current}→{d.desired}
-                        </td>
-                        <td className="truncate max-w-[140px] text-slate-400">{d.reason}</td>
-                      </tr>
-                    ))}
-                    {decisions.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="text-slate-500 py-2">
-                          no decisions yet
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </>
-      ) : (
-        <div className="space-y-3">
-        <div className="card">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white">Compare experiments (simulated)</h2>
-            <SimBadge simulated />
-          </div>
-          <div className="overflow-x-auto mt-3">
-            <table className="w-full text-xs">
-              <thead className="text-slate-500">
-                <tr>
-                  <th className="text-left p-1">policy</th>
-                  <th className="text-left p-1">avg util %</th>
-                  <th className="text-left p-1">SLA viol</th>
-                  <th className="text-left p-1">avg lat (ms)</th>
-                  <th className="text-left p-1">cost (USD)</th>
-                  <th className="text-left p-1">energy (kWh)</th>
+      <section className="bg-slate-900 rounded p-3">
+        <h2 className="mb-2">Decisions (source badge)</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-slate-400">
+                <th className="py-1">time</th>
+                <th>source</th>
+                <th>action</th>
+                <th>desired/current</th>
+                <th>reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {decisions.slice(0, 50).map((d, i) => (
+                <tr key={i} className="border-t border-slate-800">
+                  <td className="py-1">{d.timestamp || d.ts || "-"}</td>
+                  <td><DecisionBadge reason={d.reason || ""} /></td>
+                  <td>{d.action || "-"}</td>
+                  <td>{d.desired}/{d.current}</td>
+                  <td className="truncate max-w-[500px]">{d.reason}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {experiments.map((e, i) => (
-                  <tr key={i} className="border-t border-slate-800">
-                    <td className="p-1 text-accent">{e.policy}</td>
-                    <td className="p-1">{((e.avg_utilization as number) * 100).toFixed(1)}</td>
-                    <td className="p-1 text-danger">{e.sla_violations_total}</td>
-                    <td className="p-1">{(e.avg_latency_ms as number).toFixed(2)}</td>
-                    <td className="p-1">{(e.total_cost_usd as number).toFixed(3)}</td>
-                    <td className="p-1">{(e.total_energy_kwh as number).toFixed(3)}</td>
-                  </tr>
-                ))}
-                {experiments.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="text-slate-500 p-2">
-                      no experiment rows in backend; run experiments/run_eval.py
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>
-        <div className="card">
-          <h2 className="text-sm font-semibold text-white">Model error by horizon</h2>
-          <div className="h-56 mt-3">
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={modelMetrics}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="horizon_min" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                <YAxis tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                <Tooltip />
-                {[...new Set(modelMetrics.map((m) => m.model))].map((model, i) => (
-                  <Line key={model} dataKey="mape" name={model} stroke={['#5eead4', '#fbbf24', '#f87171'][i % 3]} />
-                ))}
-              </ComposedChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-        <div className="card">
-          <h2 className="text-sm font-semibold text-white">Cost vs SLA violations</h2>
-          <div className="h-56 mt-3">
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis type="number" dataKey="cost_sim" name="cost" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                <YAxis type="number" dataKey="sla_viol_sim" name="SLA violations" tick={{ fill: '#94a3b8', fontSize: 10 }} />
-                <Tooltip cursor={{ strokeDasharray: '3 3' }} />
-                <Scatter data={pareto} fill="#5eead4" />
-              </ScatterChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-        </div>
-      )}
+      </section>
     </div>
-  )
+  );
 }

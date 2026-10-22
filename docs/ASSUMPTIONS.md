@@ -28,6 +28,15 @@ experiments must call it rather than reimplement these formulas.
 - The traces used are synthetic (diurnal/steady/spiky) or user-supplied CSVs
   resampled to 1-minute buckets. Flash spikes, sudden drops and regime shifts
   are artificially injected (simulated).
+- `local_demo` is a 45-minute, one-minute-resolution simulated cycle with an
+  initial ramp, plateau, two flash spikes, a sudden drop and a persistent
+  regime shift. `loadgen` replays one minute per wall-clock minute at
+  `TIME_SCALE=1`, or compresses/expands that duration by the configured scale.
+- `make train-demo` trains P50/P90 LightGBM models on noisy cycles from multiple
+  seeds, calibrates P90 on separate seeds, and evaluates on a held-out seed.
+  Its metrics are simulated and written to `experiments/results/demo_model.csv`.
+  `PROFILE=local_demo` selects `lightgbm_local_demo.joblib`; the 14-day
+  `lightgbm.joblib` artifact remains for offline evaluation.
 - No real user behaviour, request bodies or IP distributions are represented.
 
 ## Forecasting

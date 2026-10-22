@@ -11,11 +11,11 @@ services:
     environment:
       ELASTICMIND_ENV: docker
       ELASTICMIND_DB_URL: sqlite:////data/elasticmind.db
-      ELASTICMIND_MODEL_PATH: /models/lightgbm.joblib
+      ELASTICMIND_PROFILE: local_demo
       ELASTICMIND_GATEWAY_URL: http://gateway:8001
     volumes:
       - backend-data:/data
-      - ./ml/models/artifacts:/models:ro
+      - ./ml/models/artifacts:/app/ml/models/artifacts:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health', timeout=3).raise_for_status()"]
       interval: 10s
@@ -67,14 +67,11 @@ services:
       dockerfile: infra/docker/loadgen.Dockerfile
     image: elasticmind-loadgen:local
     environment:
+      LOADGEN_PROFILE: local_demo
       LOADGEN_BACKEND_URL: http://backend:8000
       LOADGEN_TARGET_URL: http://gateway:8001
-      LOADGEN_PROFILE: diurnal
-      LOADGEN_DAYS: "1"
       ELASTICMIND_TIME_SCALE: "20"
-      LOADGEN_TRACE: /data/generated/diurnal.parquet
-    volumes:
-      - ./ml/data:/data:ro
+      LOADGEN_DAYS: "1"
     depends_on:
       backend:
         condition: service_healthy

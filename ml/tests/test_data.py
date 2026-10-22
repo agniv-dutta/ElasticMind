@@ -89,6 +89,19 @@ def test_default_events_only_for_spiky() -> None:
     assert default_events(WorkloadProfile.DIURNAL, 14) == []
 
 
+def test_local_demo_is_45_minute_scaling_cycle() -> None:
+    df = generate_workload("local_demo", seed=1, noise_frac=0.0)
+    assert len(df) == 45
+    assert df.timestamp.diff().dropna().eq(pd.Timedelta(minutes=1)).all()
+    demand = df.requests.to_numpy()
+    assert demand[0] < demand[8]  # ramp
+    assert np.allclose(demand[8:19], demand[8])  # plateau
+    assert demand[19] > demand[18] * 2  # first flash spike
+    assert demand[26] > demand[25] * 2  # second flash spike
+    assert demand[31] < demand[30]  # sudden drop
+    assert demand[38] > demand[37]  # persistent regime shift
+
+
 def test_cli_writes_parquet(tmp_path: Path) -> None:
     from ml.data.generate import main
 
