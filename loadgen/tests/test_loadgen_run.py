@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from loadgen.runner import run_load
+import pytest
+
+from loadgen.runner import run_continuous, run_load
 
 
 def test_run_load_summary(target_server=None) -> None:
@@ -28,3 +30,9 @@ def test_run_load_summary(target_server=None) -> None:
     assert summary["simulated"] is True
     assert summary["time_scale"] == 1000000.0
     assert 0 <= summary["error_rate"] <= 1
+
+
+@pytest.mark.asyncio
+async def test_continuous_load_fails_clearly_when_gateway_unreachable() -> None:
+    with pytest.raises(RuntimeError, match=r"gateway unreachable at http://127\.0\.0\.1:1/health"):
+        await run_continuous(target_url="http://127.0.0.1:1", profile="steady")

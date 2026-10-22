@@ -55,6 +55,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+.live-processes.json
+.live-logs/
 
 .pytest-tmp/
 tests/

@@ -62,6 +62,15 @@ experiments must call it rather than reimplement these formulas.
 - **Provisioning delay** is treated as a fixed window (60–120 s in the
   simulator) and actuator decisions may lag by that amount.
 - The local actuator has no real infrastructure effect.
+- Scale-up is intentionally faster than scale-down: the default cooldowns are
+  **30 s up** and **120 s down** (simulated seconds). With `TIME_SCALE=N`,
+  those windows take `30/N` and `120/N` wall-clock seconds. Scale-down is
+  slower to let a burst drain, avoid replica flapping, and avoid paying the
+  startup penalty again immediately after a reduction.
+- The latency safety net uses a windowed p95 and requires three consecutive
+  breach ticks by default. A latency breach only overrides ML when utilization
+  is at least 0.30 or the measured error rate is non-zero. The configured
+  thresholds are logged at controller startup and on each safety override.
 
 ## Cost, energy and carbon
 
@@ -83,6 +92,12 @@ experiments must call it rather than reimplement these formulas.
   modelled.
 - Misprediction scenarios (±50%, sudden spike) are scripted; recovery time and
   over-provisioning waste are also **simulated**.
+- A short spike can produce a high p95 at low average utilization: gateway p95
+  is calculated from request latencies in the interval, while utilization is
+  the interval's average request rate divided by replica capacity. The spike
+  can therefore dominate the p95 sample without raising the average above
+  0.30. This is an interval aggregation/startup-load effect, not evidence of
+  sustained queueing at 0.10 utilization.
 
 ## What would be needed for production
 

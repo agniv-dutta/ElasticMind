@@ -17,7 +17,8 @@ lab, then ships the same controller to AWS ECS Fargate via Terraform.
   quantile outputs; Holt-Winters and a persistence baseline for comparison.
 - **Autoscaler**: `desired = ceil(P90 / (capacity_per_instance × target_util))`
   with headroom, min/max, fast scale-up / slow scale-down, cooldowns and
-  hysteresis.
+  hysteresis. The latency safety net requires a windowed p95 breach for three
+  consecutive ticks and utilization >= 0.30 (or a non-zero error rate).
 - **Simulator**: replays a 1-min trace with a provisioning delay and reports
   utilization, SLA violations, latency (M/M/c-style), cost and energy.
 - **Robustness**: reactive safety net, rolling-MAPE drift alarm,
@@ -65,7 +66,10 @@ The settings fields are `PROFILE`, `TIME_SCALE`, `ACTUATOR`,
 `CAPACITY_PER_REPLICA_RPM`, `MIN_REPLICAS`, `MAX_REPLICAS`, `STARTUP_DELAY_S`,
 `DRAIN_DELAY_S`, `SLA_LATENCY_MS`, `PRICE_PER_REPLICA_HOUR`, `IDLE_WATTS`,
 `PEAK_WATTS`, `COOLDOWN_UP_S`, `COOLDOWN_DOWN_S`, and
-`SAFETY_UTILIZATION_THRESHOLD`.
+`SAFETY_UTILIZATION_THRESHOLD`. The default scale-up/scale-down cooldowns
+are 30/120 simulated seconds (30/`TIME_SCALE` and 120/`TIME_SCALE` wall-clock
+seconds). Latency safety additionally uses `SAFETY_MIN_UTILIZATION` (0.30),
+`SAFETY_LATENCY_BREACH_TICKS` (3), and `SAFETY_LATENCY_WINDOW_SIZE` (5).
 
 ### 1. Python environment
 

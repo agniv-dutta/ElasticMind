@@ -142,6 +142,44 @@ def _get_loop():
     return ControlLoop(AutoscalerConfig.from_settings(settings))
 
 
+async def _sync_gateway_replicas(app: FastAPI, replicas: int) -> None:
+    """Keep the gateway pool aligned while tolerating a temporarily absent gateway."""
+    desired = max(1, int(replicas))
+    now = asyncio.get_running_loop().time()
+    same_value = getattr(app.state, "gateway_synced_replicas", None) == desired
+    last_sync = getattr(app.state, "gateway_last_sync", 0.0)
+    if (now < getattr(app.state, "gateway_retry_at", 0.0)
+            or (same_value and now - last_sync < 30.0)):
+        return
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=1.0)) as client:
+            response = await client.put(
+                f"{settings.GATEWAY_URL.rstrip('/')}/replicas",
+                json={"desired": desired},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        failures = getattr(app.state, "gateway_sync_failures", 0) + 1
+        app.state.gateway_sync_failures = failures
+        # Back off between 2 and 60 seconds; a dead local gateway should not
+        # produce a traceback on every control tick, but recovery stays quick.
+        delay = min(60.0, 2.0 ** min(failures, 6))
+        app.state.gateway_retry_at = now + delay
+        url = getattr(getattr(exc, "request", None), "url", None)
+        logger.warning(
+            "Gateway replica sync failed: type=%s message=%s url=%s; retrying in %.0fs",
+            type(exc).__name__, str(exc), url or f"{settings.GATEWAY_URL.rstrip('/')}/replicas", delay,
+        )
+        return
+
+    app.state.gateway_synced_replicas = desired
+    app.state.gateway_last_sync = now
+    app.state.gateway_last_sync_at = datetime.now(UTC)
+    app.state.gateway_sync_failures = 0
+    app.state.gateway_retry_at = 0.0
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "env": settings.env}
@@ -154,9 +192,37 @@ def active_config():
             "actuator": settings.ACTUATOR, "model_version": settings.selected_model_path,
             "autoscaler_running": not getattr(getattr(app.state, "loop_task", None), "done", lambda: True)(),
             "last_tick_time": getattr(app.state, "last_tick_time", None),
-            "traffic_source": "gateway_connected" if live_metrics.request_count else "gateway_disconnected",
+            "traffic_source": "gateway_connected" if getattr(app.state, "gateway_synced_replicas", None) is not None else "gateway_disconnected",
             "current_policy": settings.policy,
             **settings.model_dump()}
+
+
+@app.get("/status")
+async def system_status():
+    """Expose live gateway reachability and the last successful replica sync."""
+    gateway_url = settings.GATEWAY_URL.rstrip("/")
+    gateway_healthy = False
+    running_replicas = 0
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2.0, connect=1.0)) as client:
+            response = await client.get(f"{gateway_url}/health")
+            response.raise_for_status()
+            data = response.json()
+            running_replicas = int(data.get("running_replicas", 0))
+            gateway_healthy = True
+    except httpx.HTTPError:
+        pass
+    synced = getattr(app.state, "gateway_synced_replicas", None) is not None
+    return {
+        "gateway_url": gateway_url,
+        "gateway_connected": gateway_healthy and synced,
+        "gateway_healthy": gateway_healthy,
+        "gateway_synced": synced,
+        "gateway_running_replicas": running_replicas,
+        "gateway_last_sync": getattr(app.state, "gateway_last_sync_at", None),
+        "requests_received": live_metrics.request_count,
+        "current_rpm": round(live_metrics.requests_per_min, 1),
+    }
 
 
 @app.get("/robustness/status")
@@ -184,13 +250,23 @@ def robustness_status():
 @app.get("/forecast", response_model=PredictResponse)
 def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
     req = req or PredictRequest()
+    history_rows = list(live_metrics.history)
+    history = [{"timestamp": ts.isoformat(), "actual": float(value)} for ts, value in history_rows[-360:]]
+    if len(history_rows) < 60:
+        return {"model": "reactive-fallback", "history": history, "forecast": [],
+                "decision_source": "fallback", "forecast_fallback": "insufficient_live_history",
+                "unit": "rpm", "history_points": len(history_rows)}
     try:
         model = load_predictor(settings.selected_model_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"model load failed: {e}") from e
+        return {"model": "reactive-fallback", "history": history, "forecast": [],
+                "decision_source": "fallback", "forecast_fallback": f"model_load_failed: {type(e).__name__}",
+                "unit": "rpm", "history_points": len(history_rows)}
 
-    # Build minimal history: generate a short diurnal window if no real data
-    hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
+    # Forecast live demand in the same requests-per-minute units reported by the gateway.
+    hist = __import__("pandas").DataFrame(
+        [(ts, rpm) for ts, rpm in history_rows], columns=["timestamp", "requests"]
+    )
     fc = model.predict(hist.tail(max(60, req.history_minutes)))
     frame = fc.frame
     from ml.conformal.conformal import apply_intervals
@@ -209,8 +285,8 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
             )
         )
     db.commit()
-    history = [{"timestamp": str(ts), "actual": float(value)} for ts, value in list(live_metrics.history)[-30:]]
-    return {"model": fc.model, "history": history, "forecast": points}
+    return {"model": fc.model, "history": history, "forecast": points,
+            "decision_source": "ml", "unit": "rpm", "history_points": len(history_rows)}
 
 
 @app.get("/explain")
@@ -371,10 +447,12 @@ def metrics_history(from_ts: datetime | None = Query(None), to_ts: datetime | No
 
 @app.get("/decisions")
 def decisions(db: Session = Depends(get_db)):
-    q = db.query(Decision).order_by(desc(Decision.timestamp)).limit(200)
+    q = db.query(Decision).order_by(desc(Decision.timestamp)).limit(500)
     fields = (
+        "desired", "current", "action", "running_replicas", "starting_replicas", "draining_replicas",
         "observed_load", "forecast_p50", "forecast_p90", "horizon", "model_version",
         "desired_ml", "desired_reactive", "final_desired", "decision_source", "reason",
+        "ml_candidate", "reactive_candidate", "applied", "blocked_by",
         "cooldown_state", "timestamp",
     )
     return [{key: getattr(row, key) for key in fields} for row in q]
@@ -480,11 +558,7 @@ async def control_loop_worker(app: FastAPI):
     pipeline = ControlPipeline(settings, cfg, loop)
     app.state.pipeline = pipeline
     act = _get_actuator()
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.put(f"{settings.GATEWAY_URL.rstrip('/')}/replicas", json={"desired": act.current()})
-    except httpx.HTTPError:
-        logger.info("Gateway is not available yet; it will be synchronized on the next scale action")
+    await _sync_gateway_replicas(app, act.current())
     try:
         while True:
             await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
@@ -510,6 +584,14 @@ async def control_loop_worker(app: FastAPI):
                 model_version = None
                 failure = None
                 try:
+                    history_rows = list(live_metrics.history)
+                    if len(history_rows) < 60:
+                        raise ValueError(f"insufficient_live_history: {len(history_rows)}/60 samples")
+                    import pandas as pd
+                    hist = pd.DataFrame(
+                        [(ts, rpm) for ts, rpm in history_rows],
+                        columns=["timestamp", "requests"],
+                    )
                     model = load_predictor(settings.selected_model_path)
                     horizon = min(horizon, max(model.horizons))
                     forecast = model.predict(hist.tail(480))
@@ -522,8 +604,12 @@ async def control_loop_worker(app: FastAPI):
                     app.state.forecast_fallback = None
                 except Exception as exc:
                     failure = f"{type(exc).__name__}: {exc}"
+                    if failure.startswith("ValueError: insufficient_live_history"):
+                        if getattr(app.state, "forecast_fallback", None) != failure:
+                            logger.info("Using reactive fallback while live forecast history builds: %s", failure)
+                    else:
+                        logger.exception("FORECAST FAILURE: using reactive fallback for this control tick")
                     app.state.forecast_fallback = failure
-                    logger.exception("FORECAST FAILURE: using reactive fallback for this control tick")
 
                 tick = pipeline.tick(
                     observed_load=actual,
@@ -542,6 +628,7 @@ async def control_loop_worker(app: FastAPI):
                 # Commit the tick before downstream actuator/metrics work so every
                 # completed decision remains inspectable even if an integration fails.
                 with SessionLocal() as db:
+                    replica_state = act.get_state() if hasattr(act, "get_state") else None
                     db.add(Decision(
                         timestamp=tick.timestamp.replace(tzinfo=None),
                         desired=tick.final_desired,
@@ -558,8 +645,16 @@ async def control_loop_worker(app: FastAPI):
                         desired_ml=tick.desired_ml,
                         desired_reactive=tick.desired_reactive,
                         final_desired=tick.final_desired,
+                        ml_candidate=tick.ml_candidate,
+                        reactive_candidate=tick.reactive_candidate,
+                        applied=tick.applied,
+                        blocked_by=tick.blocked_by,
                         decision_source=tick.decision_source,
                         cooldown_state=tick.cooldown_state,
+                        running_replicas=replica_state.running if replica_state else current,
+                        starting_replicas=(max(replica_state.pending_start, final - replica_state.running)
+                                            if replica_state else 0),
+                        draining_replicas=replica_state.draining if replica_state else 0,
                     ))
                     db.commit()
                 safety_override = tick.decision_source == "safety_net"
@@ -570,14 +665,7 @@ async def control_loop_worker(app: FastAPI):
                 gateway_replicas = (
                     act.get_state().running if hasattr(act, "get_state") else act.current()
                 )
-                try:
-                    async with httpx.AsyncClient(timeout=2.0) as client:
-                        await client.put(
-                            f"{settings.GATEWAY_URL.rstrip('/')}/replicas",
-                            json={"desired": max(1, gateway_replicas)},
-                        )
-                except httpx.HTTPError:
-                    logger.exception("Failed to synchronize RUNNING replica count with gateway")
+                await _sync_gateway_replicas(app, gateway_replicas)
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
                     try:

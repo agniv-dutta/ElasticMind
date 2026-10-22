@@ -6,7 +6,11 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 
 class Settings(BaseSettings):
@@ -34,6 +38,9 @@ class Settings(BaseSettings):
     COOLDOWN_UP_S: float = Field(default=30.0, ge=0)
     COOLDOWN_DOWN_S: float = Field(default=120.0, ge=0)
     SAFETY_UTILIZATION_THRESHOLD: float = Field(default=0.90, gt=0, le=1)
+    SAFETY_MIN_UTILIZATION: float = Field(default=0.30, ge=0, le=1)
+    SAFETY_LATENCY_BREACH_TICKS: int = Field(default=3, ge=1)
+    SAFETY_LATENCY_WINDOW_SIZE: int = Field(default=5, ge=1)
     ERROR_RATE_THRESHOLD: float = Field(default=0.05, ge=0, le=1)
 
     # Operational settings which are not part of the shared simulation contract.
@@ -93,8 +100,9 @@ class Settings(BaseSettings):
 
 def load_capacity_from_yaml(settings, path="configs/calibration.yaml"):
     try:
-        import yaml
         from pathlib import Path
+
+        import yaml
         p = Path(path)
         if p.exists():
             data = yaml.safe_load(p.read_text()) or {}
@@ -110,4 +118,3 @@ try:
     load_capacity_from_yaml(Settings())
 except Exception:
     pass
-

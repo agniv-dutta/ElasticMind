@@ -16,6 +16,11 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     model: str
     forecast: list[dict]
+    history: list[dict] = Field(default_factory=list)
+    decision_source: str = "ml"
+    forecast_fallback: str | None = None
+    unit: str = "rpm"
+    history_points: int = 0
 
 
 class ForecastPoint(BaseModel):
@@ -47,7 +52,7 @@ class FaultSpikeRequest(BaseModel):
 
 
 class MetricsResponse(BaseModel):
-    current_utilization: float = Field(..., description="simulated")
+    current_utilization: float = Field(..., description="measured or simulated based on provenance")
     latency_ms: float = Field(..., description="simulated")
     cost_usd: float = Field(..., description="simulated")
     energy_kwh: float = Field(..., description="simulated")

@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Column, DateTime, Float, Integer, String, Text, create_engine
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    Text,
+    create_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
@@ -49,8 +58,15 @@ class Decision(Base):
     desired_ml = Column(Integer)
     desired_reactive = Column(Integer)
     final_desired = Column(Integer)
+    ml_candidate = Column(Integer)
+    reactive_candidate = Column(Integer)
+    applied = Column(Integer)
+    blocked_by = Column(String(16))
     decision_source = Column(String(24))
     cooldown_state = Column(String(128))
+    running_replicas = Column(Integer)
+    starting_replicas = Column(Integer)
+    draining_replicas = Column(Integer)
 
 
 class Experiment(Base):
@@ -88,6 +104,13 @@ def init_db(engine) -> None:
         "final_desired": "INTEGER",
         "decision_source": "VARCHAR(24)",
         "cooldown_state": "VARCHAR(128)",
+        "running_replicas": "INTEGER",
+        "starting_replicas": "INTEGER",
+        "draining_replicas": "INTEGER",
+        "ml_candidate": "INTEGER",
+        "reactive_candidate": "INTEGER",
+        "applied": "INTEGER",
+        "blocked_by": "VARCHAR(16)",
     }
     with engine.begin() as connection:
         for name, sql_type in additions.items():
