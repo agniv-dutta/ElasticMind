@@ -93,9 +93,7 @@ class LocalReplicaPool(CapacityActuator):
         return self._desired
 
     def current(self, now: float | None = None) -> int:
-        now = now if now is not None else time.time()
-        running, _, _ = self._count(now)
-        return running
+        return self._desired
 
     def apply_delay(self, action: ScalingAction) -> float:
         return self._delay

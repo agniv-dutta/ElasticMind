@@ -48,7 +48,7 @@ logs:
 	docker compose logs -f --tail=200
 
 smoke:
-	bash scripts/smoke_test.sh
+	powershell -ExecutionPolicy Bypass -File scripts/smoke_test.ps1
 
 smoke-ps:
 	powershell -ExecutionPolicy Bypass -File scripts/smoke_test.ps1
@@ -67,4 +67,9 @@ test-venv:
 check-py:
 	python -c "import sys; assert sys.version_info[:2]==(3,11), ('use python 3.11', sys.version)"
 
+
+
+
+demo:
+	python -m experiments.run_live --profile diurnal --repeats 3
 

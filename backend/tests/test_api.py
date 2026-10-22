@@ -14,6 +14,11 @@ def test_health() -> None:
     assert resp.json()["status"] == "ok"
 
 
+def test_dashboard_get_endpoints_all_return_200() -> None:
+    for path in ("/metrics/current", "/decisions", "/config", "/robustness/status", "/forecast", "/capacity"):
+        assert client.get(path).status_code == 200, path
+
+
 def test_config_endpoint_exposes_shared_settings() -> None:
     resp = client.get("/config")
     assert resp.status_code == 200

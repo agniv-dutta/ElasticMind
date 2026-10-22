@@ -23,6 +23,7 @@ ml/data/generated/*
 
 # Results (keep structure)
 experiments/results/*.csv
+!experiments/results/demo_model.csv
 experiments/results/*.png
 !experiments/results/.gitkeep
 
@@ -54,3 +55,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+.pytest-tmp/
+tests/

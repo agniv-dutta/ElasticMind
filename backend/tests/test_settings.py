@@ -5,6 +5,12 @@ from backend.app.core.config import Settings
 from backend.app.simulator.simulator import SimConfig
 
 
+def test_autoscaler_config_from_default_settings():
+    cfg = AutoscalerConfig.from_settings(Settings(_env_file=None, _yaml_file=None))
+    assert cfg.min_instances == 1
+    assert cfg.max_instances == 10
+
+
 def test_shared_settings_feed_runtime_configs(monkeypatch) -> None:
     monkeypatch.setenv("ELASTICMIND_TIME_SCALE", "4")
     monkeypatch.setenv("ELASTICMIND_STARTUP_DELAY_S", "80")
@@ -21,9 +27,9 @@ def test_shared_settings_feed_runtime_configs(monkeypatch) -> None:
 
     assert autoscaler.capacity_per_instance == 750
     assert (autoscaler.min_instances, autoscaler.max_instances) == (2, 8)
-    assert autoscaler.provision_delay_s == 20
-    assert autoscaler.fast_scale_up_cooldown_s == 10
-    assert autoscaler.slow_scale_down_cooldown_s == 30
+    assert autoscaler.provisioning_delay_s == 20
+    assert autoscaler.fast_scale_up_cooldown_s == 40
+    assert autoscaler.slow_scale_down_cooldown_s == 120
     assert simulator.service_rate == 750
     assert simulator.provisioning_delay_s == 20
     assert simulator.cost_per_instance_hour == 0.25

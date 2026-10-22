@@ -22,13 +22,13 @@ class AutoscalerConfig:
     def from_settings(cls, s: Settings | None = None) -> "AutoscalerConfig":
         s = s or Settings()
         return cls(
-            min_instances=s.min_instances,
-            max_instances=s.max_instances,
-            target_utilization=s.target_utilization,
+            min_instances=s.MIN_REPLICAS,
+            max_instances=s.MAX_REPLICAS,
+            target_utilization=s.TARGET_UTILIZATION,
             headroom=s.headroom,
             capacity_per_instance=s.CAPACITY_PER_REPLICA_RPM,
-            fast_scale_up_cooldown_s=s.fast_scale_up_cooldown_s,
-            slow_scale_down_cooldown_s=s.slow_scale_down_cooldown_s,
+            fast_scale_up_cooldown_s=int(s.COOLDOWN_UP_S),
+            slow_scale_down_cooldown_s=int(s.COOLDOWN_DOWN_S),
             hysteresis=s.hysteresis,
-            provisioning_delay_s=s.provisioning_delay_s,
+            provisioning_delay_s=s.scaled_delay(s.STARTUP_DELAY_S),
         )

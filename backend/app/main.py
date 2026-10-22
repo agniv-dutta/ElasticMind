@@ -150,7 +150,13 @@ def health():
 @app.get("/config")
 def active_config():
     """Return the effective shared configuration (YAML plus environment overrides)."""
-    return settings.model_dump()
+    return {"profile": settings.PROFILE, "time_scale": settings.TIME_SCALE,
+            "actuator": settings.ACTUATOR, "model_version": settings.selected_model_path,
+            "autoscaler_running": not getattr(getattr(app.state, "loop_task", None), "done", lambda: True)(),
+            "last_tick_time": getattr(app.state, "last_tick_time", None),
+            "traffic_source": "gateway_connected" if live_metrics.request_count else "gateway_disconnected",
+            "current_policy": settings.policy,
+            **settings.model_dump()}
 
 
 @app.get("/robustness/status")
@@ -203,7 +209,8 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
             )
         )
     db.commit()
-    return {"model": fc.model, "forecast": points}
+    history = [{"timestamp": str(ts), "actual": float(value)} for ts, value in list(live_metrics.history)[-30:]]
+    return {"model": fc.model, "history": history, "forecast": points}
 
 
 @app.get("/explain")
@@ -530,6 +537,7 @@ async def control_loop_worker(app: FastAPI):
                     fallback_reason=failure,
                     now=asyncio.get_running_loop().time(),
                 )
+                app.state.last_tick_time = datetime.now(UTC).isoformat()
                 final = tick.final_desired
                 # Commit the tick before downstream actuator/metrics work so every
                 # completed decision remains inspectable even if an integration fails.

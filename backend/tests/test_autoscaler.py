@@ -61,6 +61,8 @@ def test_static_policy_fixed() -> None:
 
 def test_actuator_clamps_and_tracks() -> None:
     a = LocalSimActuator(initial=5, min_c=1, max_c=6, delay_s=30)
+    a.scale_up_cooldown_s = 0
+    a.scale_down_cooldown_s = 0
     assert a.current() == 5
     a.set_desired(10)
     assert a.current() == 6

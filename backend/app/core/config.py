@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     """Application settings; YAML is the base and ELASTICMIND_* env vars override it."""
 
     model_config = SettingsConfigDict(
-        env_prefix="ELASTICMIND_", env_file=".env", yaml_file="config.yaml", extra="ignore"
+        env_prefix="ELASTICMIND_", env_file=".env", yaml_file="config.yaml", extra="allow"
     )
 
     PROFILE: Literal["offline", "local_demo", "aws_demo"] = "offline"

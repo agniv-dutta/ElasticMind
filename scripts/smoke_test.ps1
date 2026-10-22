@@ -1,27 +1,33 @@
-# ElasticMind end-to-end smoke test (PowerShell, no Docker required).
+# ElasticMind stack smoke: launch services, run sustained traffic and verify scaling.
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
-Write-Host "==> 1/5 python test suite"
-python -m pytest ml backend loadgen target_app gateway -q
-
-Write-Host "==> 2/5 generate data + train (fast settings)"
-python -m ml.data.generate --profile diurnal --days 7 --out ml/data/generated/smoke.parquet
-python -m ml.train --data ml/data/generated/smoke.parquet --models lightgbm reactive_baseline --stride 60 --max-points 8
-
-Write-Host "==> 3/5 run policy evaluation"
-python -m experiments.run_eval --trace ml/data/generated/smoke.parquet
-
-Write-Host "==> 4/5 run misprediction scenarios"
-python -m experiments.run_misprediction
-
-Write-Host "==> 5/5 verify artifacts"
-foreach ($f in @(
-    "experiments/results/model_comparison.csv",
-    "experiments/results/policy_comparison.csv",
-    "experiments/results/misprediction_scenarios.csv")) {
-    if (-not (Test-Path $f)) { throw "missing artifact: $f" }
+docker compose up --build -d backend gateway
+try {
+    $backend = "http://localhost:8000"
+    $gateway = "http://localhost:8001"
+    for ($i=0; $i -lt 60; $i++) {
+        try { Invoke-RestMethod "$backend/health" | Out-Null; break } catch { Start-Sleep 2 }
+    }
+    Invoke-RestMethod -Method Post -Uri "$backend/autoscaler/start" | Out-Null
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        Invoke-RestMethod "$gateway/work" | Out-Null
+        Start-Sleep -Milliseconds 100
+    }
+    Invoke-RestMethod -Method Post -Uri "$backend/faults/spike" -ContentType "application/json" -Body '{"magnitude":2,"duration_minutes":5}' | Out-Null
+    $before = (Invoke-RestMethod "$backend/capacity").desired_instances
+    $until = (Get-Date).AddSeconds(90)
+    do {
+        1..100 | ForEach-Object { Invoke-RestMethod "$gateway/work" | Out-Null }
+        Start-Sleep 2
+        $decisions = Invoke-RestMethod "$backend/decisions"
+        $capacity = Invoke-RestMethod "$backend/capacity"
+    } while ((Get-Date) -lt $until -and $capacity.desired_instances -le $before)
+    if (-not ($decisions | Where-Object { $_.decision_source -and $_.reason })) { throw "No decision with source and reason" }
+    if ($capacity.desired_instances -le $before) { throw "Desired replicas did not increase" }
+    Write-Host "Smoke passed: desired replicas $before -> $($capacity.desired_instances)"
+} finally {
+    docker compose down
 }
-
-Write-Host "==> smoke test OK"

@@ -18,6 +18,7 @@ async function post<T>(path: string, body?: any): Promise<T> {
 
 export const api = {
   health: function() { return get<any>('/health'); },
+  config: function() { return get<any>('/config'); },
   capacity: function() { return get<any>('/capacity'); },
   forecast: function() { return get<any>('/forecast'); },
   metricsCurrent: function() { return get<any>('/metrics/current'); },

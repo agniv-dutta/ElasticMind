@@ -15,7 +15,12 @@ from typing import Any
 import joblib
 import pandas as pd
 
-from ml.features.engineering import build_features, make_supervised
+from ml.features.engineering import (
+    DEFAULT_LAGS,
+    DEFAULT_WINDOWS,
+    build_features,
+    make_supervised,
+)
 from ml.models.base import DEFAULT_HORIZONS, ForecastResult, Predictor
 
 try:
@@ -57,8 +62,8 @@ class LightGBMMultiHorizon(Predictor):
         n_estimators: int = 400,
         val_fraction: float = 0.15,
         seed: int = 42,
-        lags: tuple[int, ...] = (1, 2, 3, 5),
-        windows: tuple[int, ...] = (3, 5),
+        lags: tuple[int, ...] = DEFAULT_LAGS,
+        windows: tuple[int, ...] = DEFAULT_WINDOWS,
     ) -> None:
         super().__init__(horizons)
         self.params = dict(params or lgb_params or {})
