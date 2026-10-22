@@ -17,7 +17,7 @@ def test_run_load_summary(target_server=None) -> None:
             backend_url=None,
             profile="steady",
             days=1,
-            speed_factor=1.0,
+            speed_factor=1000000.0,
             max_requests=5,
             concurrency=2,
         )
@@ -26,3 +26,5 @@ def test_run_load_summary(target_server=None) -> None:
     assert "success_rate" in summary
     assert "latency_p50_ms" in summary
     assert summary["simulated"] is True
+    assert summary["time_scale"] == 1000000.0
+    assert 0 <= summary["error_rate"] <= 1

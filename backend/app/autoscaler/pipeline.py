@@ -55,6 +55,7 @@ class ControlPipeline:
         forecast_p90: float | None,
         horizon: int,
         model_version: str | None,
+        error_rate: float = 0.0,
         fallback_reason: str | None = None,
         timestamp: datetime | None = None,
         now: float | None = None,
@@ -69,11 +70,12 @@ class ControlPipeline:
         safety_triggered = (
             utilization >= self.settings.SAFETY_UTILIZATION_THRESHOLD
             or latency_ms >= self.settings.SLA_LATENCY_MS
+            or error_rate >= self.settings.ERROR_RATE_THRESHOLD
         )
         if safety_triggered:
             effective_capacity = self.cfg.capacity_per_instance * self.cfg.target_utilization
             load_sized = math.ceil(observed_load * (1 + self.cfg.headroom) / max(effective_capacity, 1e-9))
-            reactive = max(current + (1 if latency_ms >= self.settings.SLA_LATENCY_MS else 0), load_sized)
+            reactive = max(current + (1 if latency_ms >= self.settings.SLA_LATENCY_MS or error_rate >= self.settings.ERROR_RATE_THRESHOLD else 0), load_sized)
             reactive = max(self.cfg.min_instances, min(self.cfg.max_instances, reactive))
 
         ml_candidate: int | None = None
@@ -94,7 +96,8 @@ class ControlPipeline:
             source = "safety_net"
             final = reactive
             reason = (
-                f"Safety override: utilization {utilization:.3f} / latency {latency_ms:.1f} ms; "
+                f"Safety override: utilization {utilization:.3f} / latency {latency_ms:.1f} ms / "
+                f"error rate {error_rate:.3f}; "
                 f"ML candidate {ml_candidate}, reactive candidate {reactive}."
             )
             # Safety action is immediate and starts the appropriate cooldown.

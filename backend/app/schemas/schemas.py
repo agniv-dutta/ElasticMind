@@ -55,6 +55,9 @@ class MetricsResponse(BaseModel):
     timestamp: datetime
     provenance: dict[str, str]
     energy_label: str = "estimated"
+    request_count: int = 0
+    error_rate: float = 0.0
+    running_replicas: int = 1
 
 
 class HistoryQuery(BaseModel):

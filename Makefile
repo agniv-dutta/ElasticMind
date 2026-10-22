@@ -4,33 +4,33 @@ PYTHON ?= python
 PIP ?= pip
 
 setup:
-	$(PIP) install -e ./ml -e ./backend -e ./loadgen -e ./target_app
+	$(PIP) install -e ./ml -e ./backend -e ./loadgen -e ./target_app -e ./gateway
 	$(PIP) install pytest ruff black pre-commit
 	pre-commit install || true
 	cd frontend && npm install
 
 test:
-	$(PYTHON) -m pytest ml backend loadgen target_app -q
+	$(PYTHON) -m pytest ml backend loadgen target_app gateway -q
 
 lint:
-	ruff check ml backend loadgen target_app experiments
-	black --check ml backend loadgen target_app experiments
+	ruff check ml backend loadgen target_app gateway experiments
+	black --check ml backend loadgen target_app gateway experiments
 	cd frontend && npm run lint --if-present
 	cd frontend && npx tsc --noEmit
 
 fmt:
-	ruff check --fix ml backend loadgen target_app experiments
-	black ml backend loadgen target_app experiments
+	ruff check --fix ml backend loadgen target_app gateway experiments
+	black ml backend loadgen target_app gateway experiments
 
 train:
 	$(PYTHON) -m ml.data.generate --profile diurnal --days 14 --out ml/data/generated/diurnal.parquet
 	$(PYTHON) -m ml.train --data ml/data/generated/diurnal.parquet
 
 run:
-	docker compose up --build backend target_app
+	docker compose up --build backend gateway
 
 up:
-	docker compose up --build -d backend target_app frontend
+	docker compose up --build -d backend gateway frontend
 
 demo:
 	bash scripts/demo.sh

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     PROFILE: Literal["offline", "local_demo", "aws_demo"] = "offline"
     TIME_SCALE: float = Field(default=1.0, gt=0)
-    ACTUATOR: Literal["local", "aws"] = "local"
+    ACTUATOR: Literal["local", "aws"] = "local"  # local default per requirement
     CONTROL_INTERVAL_S: float = Field(default=5.0, gt=0)
     FORECAST_HORIZON_MIN: int = Field(default=15, gt=0)
     TARGET_UTILIZATION: float = Field(default=0.70, gt=0, le=1)
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     COOLDOWN_UP_S: float = Field(default=30.0, ge=0)
     COOLDOWN_DOWN_S: float = Field(default=120.0, ge=0)
     SAFETY_UTILIZATION_THRESHOLD: float = Field(default=0.90, gt=0, le=1)
+    ERROR_RATE_THRESHOLD: float = Field(default=0.05, ge=0, le=1)
 
     # Operational settings which are not part of the shared simulation contract.
     env: str = "development"
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     ecs_cluster: str = "elasticmind"
     ecs_service: str = "elasticmind-target"
     model_s3_uri: str = ""
+    GATEWAY_URL: str = "http://localhost:8001"
 
     @classmethod
     def settings_customise_sources(

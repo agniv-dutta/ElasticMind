@@ -4,7 +4,7 @@ $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
 Write-Host "==> 1/5 python test suite"
-python -m pytest ml backend loadgen target_app -q
+python -m pytest ml backend loadgen target_app gateway -q
 
 Write-Host "==> 2/5 generate data + train (fast settings)"
 python -m ml.data.generate --profile diurnal --days 7 --out ml/data/generated/smoke.parquet

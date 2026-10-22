@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> 1/5 python test suite"
-python -m pytest ml backend loadgen target_app -q
+python -m pytest ml backend loadgen target_app gateway -q
 
 echo "==> 2/5 generate data + train (fast settings)"
 python -m ml.data.generate --profile diurnal --days 7 --out ml/data/generated/smoke.parquet

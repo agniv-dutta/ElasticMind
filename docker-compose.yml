@@ -11,8 +11,8 @@ services:
     environment:
       ELASTICMIND_ENV: docker
       ELASTICMIND_DB_URL: sqlite:////data/elasticmind.db
-      TARGET_APP_BASE_URL: http://target_app:8001
       ELASTICMIND_MODEL_PATH: /models/lightgbm.joblib
+      ELASTICMIND_GATEWAY_URL: http://gateway:8001
     volumes:
       - backend-data:/data
       - ./ml/models/artifacts:/models:ro
@@ -22,6 +22,9 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
+    depends_on:
+      gateway:
+        condition: service_healthy
 
   frontend:
     build:
@@ -37,16 +40,19 @@ services:
         condition: service_healthy
 
 
-  target_app:
+  gateway:
     build:
       context: .
-      dockerfile: infra/docker/target_app.Dockerfile
-    image: elasticmind-target-app:local
+      dockerfile: infra/docker/gateway.Dockerfile
+    image: elasticmind-gateway:local
     ports:
       - "8001:8001"
     environment:
-      TARGET_APP_PORT: "8001"
-      TARGET_APP_CPU_BURN_MS: "40"
+      GATEWAY_BACKEND_URL: http://backend:8000
+      GATEWAY_INITIAL_REPLICAS: "1"
+      GATEWAY_CPU_BURN_MS: "40"
+      GATEWAY_CAPACITY_PER_REPLICA_RPM: "500"
+      GATEWAY_METRICS_INTERVAL_S: "5"
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/health', timeout=3).raise_for_status()"]
       interval: 10s
@@ -62,17 +68,17 @@ services:
     image: elasticmind-loadgen:local
     environment:
       LOADGEN_BACKEND_URL: http://backend:8000
-      LOADGEN_TARGET_URL: http://target_app:8001
+      LOADGEN_TARGET_URL: http://gateway:8001
       LOADGEN_PROFILE: diurnal
       LOADGEN_DAYS: "1"
-      LOADGEN_SPEED_FACTOR: "20"
+      ELASTICMIND_TIME_SCALE: "20"
       LOADGEN_TRACE: /data/generated/diurnal.parquet
     volumes:
       - ./ml/data:/data:ro
     depends_on:
       backend:
         condition: service_healthy
-      target_app:
+      gateway:
         condition: service_healthy
 
 volumes:

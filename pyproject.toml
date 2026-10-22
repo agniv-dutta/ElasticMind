@@ -15,7 +15,7 @@ line-length = 100
 extend-exclude = "frontend"
 
 [tool.pytest.ini_options]
-testpaths = ["ml/tests", "backend/tests", "loadgen/tests", "target_app/tests", "experiments/tests"]
+testpaths = ["ml/tests", "backend/tests", "loadgen/tests", "target_app/tests", "gateway/tests", "experiments/tests"]
 asyncio_mode = "auto"
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]

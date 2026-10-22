@@ -12,7 +12,8 @@ flowchart LR
     end
 
     subgraph Scaled service
-        TA[target_app<br/>FastAPI /work]
+        GW[gateway<br/>FastAPI round-robin]
+        RP[RUNNING replica pool<br/>CPU-burn workers]
     end
 
     subgraph Control plane
@@ -27,13 +28,15 @@ flowchart LR
         DASH[React dashboard<br/>Vite + Recharts]
     end
 
-    LG -->|HTTP load| TA
-    TA -->|latency, request counts| MC
+    LG -->|scaled profile HTTP traffic| GW
+    GW -->|round robin, queue/reject| RP
+    RP -->|status, replica ID, latency| GW
+    GW -->|interval count, errors, p50/p95, utilization| MC
     MC -->|persist| DB
     DB --> P
     P -->|forecast P50/P90| AS
     AS -->|desired instances| CA
-    CA -->|scale| TA
+    CA -->|desired replica count| GW
     DB -->|JSON API| DASH
     MC -->|POST /predict, faults| DASH
     DASH -->|policy switch, start/stop| AS
@@ -41,13 +44,15 @@ flowchart LR
 
 ## Data flow in words
 
-1. **loadgen** replays a workload trace (or synthetic profile) as real HTTP
-   traffic against **target_app**, at a configurable speed-up factor.
-2. **target_app** burns configurable CPU per request and reports its own
-   per-request latency.
-3. The **backend metrics collector** records measured request counts and
-   latency, plus *simulated* utilization/cost/energy derived from the
-   power/cost model, into **SQLite**.
+1. **loadgen** replays a workload trace (or synthetic profile) as HTTP traffic
+   against the gateway, preserving trace request counts while compressing
+   simulated time by `TIME_SCALE`.
+2. **gateway** round-robins requests across RUNNING replicas. Replica workers
+   run a configurable CPU-burn service model, enforce concurrency and queue
+   bounds, and record status, latency, request ID, and replica ID.
+3. The gateway posts per-interval request count, error rate, p50/p95 latency,
+   and utilization to the backend. The controller uses this observed telemetry
+   as its current-load input.
 4. The **predictor** engineers features (lags, rolling stats, cyclical
    encodings) and forecasts demand at 5/15/30-minute horizons with P50 and P90
    quantiles.

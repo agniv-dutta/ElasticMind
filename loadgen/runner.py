@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import statistics
+import math
 import time
+import os
 from pathlib import Path
 
 import httpx
 import pandas as pd
 from ml.data.generate import generate_workload
-from backend.app.core.config import Settings
 
 
 def _load_trace(path: str | None, profile: str, days: int) -> pd.DataFrame:
@@ -29,6 +29,14 @@ def _load_trace(path: str | None, profile: str, days: int) -> pd.DataFrame:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         return df
     return generate_workload(profile=profile, days=days, seed=42)
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = max(0, math.ceil(percentile / 100.0 * len(ordered)) - 1)
+    return ordered[rank]
 
 
 async def run_load(
@@ -45,8 +53,9 @@ async def run_load(
 
     Returns a summary dict with request count, success rate, p50, p95 latency.
     """
-    settings = Settings()
-    speed_factor = settings.TIME_SCALE if speed_factor is None else speed_factor
+    speed_factor = float(os.getenv("ELASTICMIND_TIME_SCALE", "1")) if speed_factor is None else speed_factor
+    if speed_factor <= 0:
+        raise ValueError("speed_factor must be positive")
     trace = _load_trace(trace_path, profile, days)
     requests_per_min = trace["requests"].astype(float).tolist()
 
@@ -58,13 +67,13 @@ async def run_load(
     start = time.time()
     sem = asyncio.Semaphore(concurrency)
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        async def one() -> None:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        async def one(request_id: int) -> None:
             nonlocal successes, failures, total
             async with sem:
                 try:
                     t0 = time.perf_counter()
-                    r = await client.get(f"{target_url}/work")
+                    r = await client.get(f"{target_url.rstrip('/')}/work", headers={"x-request-id": str(request_id)})
                     dt = (time.perf_counter() - t0) * 1000.0
                     latencies.append(dt)
                     if r.status_code == 200:
@@ -78,19 +87,21 @@ async def run_load(
 
         tasks: list[asyncio.Task] = []
         spawned = 0
+        replay_start = time.perf_counter()
         for i in range(len(trace)):
             if max_requests is not None and spawned >= max_requests:
                 break
-            # n requests to launch in this simulated minute: per-second rate
-            # from the trace scaled by the speed-up factor.
-            n = max(1, round(requests_per_min[i] / 60.0 * speed_factor))
+            tick_seconds = 60.0 / speed_factor
+            tick_start = i * tick_seconds
+            # Preserve each trace minute's arrival rate while compressing time.
+            n = max(0, round(requests_per_min[i]))
             if max_requests is not None:
                 n = min(n, max_requests - spawned)
-            spawned += n
-            for _ in range(n):
-                tasks.append(asyncio.create_task(one()))
-            # yield control so in-flight requests can progress
-            await asyncio.sleep(0)
+            for j in range(n):
+                due = tick_start + (j / max(n, 1)) * tick_seconds
+                await asyncio.sleep(max(0.0, replay_start + due - time.perf_counter()))
+                spawned += 1
+                tasks.append(asyncio.create_task(one(spawned)))
         # run all
         await asyncio.gather(*tasks)
 
@@ -101,18 +112,15 @@ async def run_load(
         "successes": successes,
         "failures": failures,
         "success_rate": round(successes / max(total, 1), 4),
-        "latency_p50_ms": round(statistics.quantiles(latencies, n=5)[0], 2) if len(latencies) >= 5 else 0.0,
-        "latency_p95_ms": round(statistics.quantiles(latencies, n=5)[-1], 2) if len(latencies) >= 5 else 0.0,
+        "latency_p50_ms": round(_percentile(latencies, 50), 2),
+        "latency_p95_ms": round(_percentile(latencies, 95), 2),
+        "error_rate": round(failures / max(total, 1), 4),
         "duration_s": round(dur, 3),
         "simulated": True,
+        "traffic_profile": profile,
+        "time_scale": speed_factor,
+        "telemetry_source": "gateway",
     }
-
-    if backend_url:
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as bc:
-                await bc.post(f"{backend_url}/metrics", json=summary)
-        except Exception:
-            pass
 
     return summary
 
@@ -122,7 +130,7 @@ def main(argv: list[str] | None = None) -> None:
     import os
 
     p = argparse.ArgumentParser(description="ElasticMind load generator")
-    p.add_argument("--target-url", default="http://localhost:8001")
+    p.add_argument("--target-url", default=os.getenv("LOADGEN_TARGET_URL", "http://localhost:8001"))
     p.add_argument("--backend-url", default=os.getenv("LOADGEN_BACKEND_URL"))
     p.add_argument("--trace", default=os.getenv("LOADGEN_TRACE"))
     p.add_argument("--profile", default=os.getenv("LOADGEN_PROFILE", "diurnal"))

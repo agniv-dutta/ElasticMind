@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +43,7 @@ from backend.app.schemas.schemas import (
 )
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 from ml.data.generate import generate_workload
 from ml.models.registry import load_predictor
 from sqlalchemy import desc
@@ -56,6 +58,10 @@ class LiveMetrics:
         self.success_rate = 1.0
         self.timestamp = datetime.now(UTC)
         self.request_count = 0
+        self.error_rate = 0.0
+        self.utilization = 0.0
+        self.running_replicas = 1
+        self.history: deque[tuple[datetime, float]] = deque(maxlen=480)
 
 live_metrics = LiveMetrics()
 logger = logging.getLogger("elasticmind.control")
@@ -264,29 +270,21 @@ def fault_spike(req: FaultSpikeRequest):
     return {"magnitude": req.magnitude, "duration_minutes": req.duration_minutes, "simulated": True}
 
 
-# Shared state for live metrics from loadgen
-class LiveMetrics:
-    def __init__(self):
-        self.requests_per_min = 0.0
-        self.latency_p50_ms = 0.0
-        self.latency_p95_ms = 0.0
-        self.success_rate = 1.0
-        self.timestamp = datetime.now(UTC)
-        self.request_count = 0
-
-live_metrics = LiveMetrics()
-
-
 @app.post("/metrics")
 def receive_metrics(data: dict):
-    """Receive metrics from loadgen (simulated measurements)."""
-    live_metrics.requests_per_min = data.get("requests_total", 0) / max(data.get("duration_s", 1), 0.1) * 60
+    """Receive measured request telemetry from the gateway interval reporter."""
+    duration_s = max(float(data.get("duration_s", 1)), 0.1)
+    live_metrics.requests_per_min = data.get("requests_total", 0) / duration_s * 60
     live_metrics.latency_p50_ms = data.get("latency_p50_ms", 0.0)
     live_metrics.latency_p95_ms = data.get("latency_p95_ms", 0.0)
     live_metrics.success_rate = data.get("success_rate", 1.0)
+    live_metrics.error_rate = data.get("error_rate", 1.0 - live_metrics.success_rate)
+    live_metrics.utilization = data.get("utilization", 0.0)
+    live_metrics.running_replicas = int(data.get("running_replicas", 1))
     live_metrics.request_count = data.get("requests_total", 0)
     live_metrics.timestamp = datetime.now(UTC)
-    return {"status": "received", "simulated": True}
+    live_metrics.history.append((live_metrics.timestamp, live_metrics.requests_per_min))
+    return {"status": "received", "source": "gateway", "measured": True}
 
 
 @app.get("/metrics", response_model=MetricsResponse)
@@ -336,8 +334,12 @@ def metrics_current():
         timestamp=now,
         provenance={"utilization": metric_source, "sla_count": metric_source,
                     "latency_ms": metric_source, "cost_usd": "simulated",
-                    "energy_kwh": "simulated"},
+                    "energy_kwh": "simulated", "error_rate": metric_source,
+                    "request_count": metric_source, "running_replicas": "measured"},
         energy_label="estimated",
+        request_count=live_metrics.request_count,
+        error_rate=live_metrics.error_rate,
+        running_replicas=live_metrics.running_replicas,
     )
 
 
@@ -463,19 +465,20 @@ async def control_loop_worker(app: FastAPI):
     app.state.pipeline = pipeline
     act = _get_actuator()
     try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.put(f"{settings.GATEWAY_URL.rstrip('/')}/replicas", json={"desired": act.current()})
+    except httpx.HTTPError:
+        logger.info("Gateway is not available yet; it will be synchronized on the next scale action")
+    try:
         while True:
             await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
             try:
                 hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
-                actual = (
-                    live_metrics.requests_per_min
-                    if live_metrics.request_count > 0
-                    else float(hist["requests"].iloc[-1])
-                )
+                actual = live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0
                 current = act.current()
                 loop.state.current_instances = current
                 latency = live_metrics.latency_p95_ms if live_metrics.request_count > 0 else 0.0
-                utilization = calculate_metrics(
+                utilization = live_metrics.utilization if live_metrics.request_count > 0 else calculate_metrics(
                     demand=actual, served_load=actual, running_replicas=current,
                     capacity_per_replica=cfg.capacity_per_instance,
                     service_rate=cfg.capacity_per_instance,
@@ -510,6 +513,7 @@ async def control_loop_worker(app: FastAPI):
                     observed_load=actual,
                     utilization=utilization,
                     latency_ms=latency,
+                    error_rate=live_metrics.error_rate,
                     forecast_p50=p50,
                     forecast_p90=p90,
                     horizon=horizon,
@@ -546,6 +550,14 @@ async def control_loop_worker(app: FastAPI):
                     action = act.set_desired(final, force=safety_override)
                     loop.state.current_instances = action.desired
                     audit_log.record(action.desired, action.current, action.reason, tick.reason)
+                    try:
+                        async with httpx.AsyncClient(timeout=2.0) as client:
+                            await client.put(
+                                f"{settings.GATEWAY_URL.rstrip('/')}/replicas",
+                                json={"desired": action.desired},
+                            )
+                    except httpx.HTTPError:
+                        logger.exception("Failed to apply desired replica count to gateway")
                 pub = getattr(app.state, "metrics_pub", None)
                 if pub is not None:
                     try:

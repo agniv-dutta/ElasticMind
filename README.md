@@ -31,8 +31,8 @@ lab, then ships the same controller to AWS ECS Fargate via Terraform.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the Mermaid diagram.
 
 ```
-loadgen → target_app → metrics collector → SQLite → predictor → autoscaler
-        → capacity actuator → target_app
+loadgen → gateway → replica pool → gateway metrics → backend → predictor
+        → autoscaler → capacity actuator → gateway replica pool
 React dashboard ← backend JSON API
 ```
 
@@ -44,7 +44,8 @@ elasticmind/
 ├── backend/      # FastAPI, autoscaler, simulator, robustness, SQLite
 ├── frontend/     # React dashboard
 ├── loadgen/      # async Python traffic generator
-├── target_app/   # tiny FastAPI app being scaled
+├── gateway/      # FastAPI round-robin gateway and CPU-burn replica pool
+├── target_app/   # standalone target service for local experiments
 ├── infra/        # docker-compose, dockerfiles, terraform
 ├── experiments/  # scripted runs + results
 └── docs/         # architecture, assumptions, report, demo script
@@ -54,12 +55,10 @@ elasticmind/
 
 ### Shared runtime settings
 
-Backend, load generator, and experiment scripts use the same `Settings` model
-from `backend.app.core.config`. Values come from `config.yaml` in the working
-directory, then `ELASTICMIND_*` environment variables override them. For
-example, set `ELASTICMIND_TIME_SCALE=10` to run delays and cooldowns at one tenth
-of their configured wall-clock duration. The effective values are available at
-`GET /config`.
+Backend and experiment scripts use the shared `Settings` model. Loadgen reads
+`ELASTICMIND_TIME_SCALE` directly and spaces HTTP requests according to the
+profile at that speed-up factor. For example, `ELASTICMIND_TIME_SCALE=10`
+replays each simulated minute in six wall-clock seconds.
 
 The settings fields are `PROFILE`, `TIME_SCALE`, `ACTUATOR`,
 `CONTROL_INTERVAL_S`, `FORECAST_HORIZON_MIN`, `TARGET_UTILIZATION`,
@@ -95,7 +94,7 @@ python -m experiments.run_misprediction
 ### 4. Run everything with Docker
 
 ```bash
-make up      # backend + frontend + target_app
+make up      # backend + gateway + frontend
 make demo     # train if needed, start stack, loadgen, misprediction scenario
 make down
 ```
@@ -109,7 +108,14 @@ On Windows use the PowerShell scripts instead of `make`:
 
 - Dashboard: <http://localhost:5173>
 - API docs:  <http://localhost:8000/docs>
-- Target app: <http://localhost:8001/health>
+- Gateway: <http://localhost:8001/health>
+- Gateway replica pool: <http://localhost:8001/replicas>
+
+The gateway accepts `GET /work`, records request ID, status, replica ID and
+latency at `GET /requests`, and publishes interval metrics to the backend.
+Scale its local pool with `PUT /replicas` and JSON `{"desired": 4}`. Configure
+worker service time and saturation with `GATEWAY_CPU_BURN_MS`,
+`GATEWAY_CONCURRENCY_PER_REPLICA`, and `GATEWAY_QUEUE_LIMIT`.
 
 ## Tests & lint
 
