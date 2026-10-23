@@ -169,6 +169,12 @@ resource "aws_ecs_task_definition" "backend" {
       { name = "ELASTICMIND_ECS_CLUSTER", value = aws_ecs_cluster.main.name },
       { name = "ELASTICMIND_ECS_SERVICE", value = aws_ecs_service.target.name },
       { name = "ELASTICMIND_MODEL_S3_URI", value = "s3://${aws_s3_bucket.artifacts.bucket}/${var.model_s3_prefix}/lightgbm.joblib" },
+      { name = "ELASTICMIND_AWS_ALB_LOAD_BALANCER", value = aws_lb.main.arn_suffix },
+      { name = "ELASTICMIND_AWS_ALB_TARGET_GROUP", value = aws_lb_target_group.target.arn_suffix },
+      { name = "ELASTICMIND_AWS_TELEMETRY_PERIOD_S", value = "60" },
+      { name = "ELASTICMIND_AWS_TELEMETRY_STALE_AFTER_S", value = "180" },
+      { name = "ELASTICMIND_MIN_REPLICAS", value = tostring(var.target_min_count) },
+      { name = "ELASTICMIND_MAX_REPLICAS", value = tostring(var.target_max_count) },
       { name = "AWS_REGION", value = var.aws_region },
     ]
     logConfiguration = {

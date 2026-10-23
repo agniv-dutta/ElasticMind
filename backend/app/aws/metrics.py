@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 try:
@@ -120,3 +120,51 @@ class CloudWatchMetricsPublisher:
             if cpu is not None:
                 out["ecs_cpu_utilization"] = cpu
         return out
+
+    def read_workload_sample(
+        self,
+        load_balancer: str,
+        target_group: str,
+        period_s: int = 60,
+        stale_after_s: int = 180,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Read the latest complete ALB request-count period as measured RPM.
+
+        ``RequestCount`` is an AWS/ApplicationELB sum over ``period_s``. The
+        datapoint timestamp is retained so callers can reject missing, stale,
+        or duplicate samples before adding them to forecast history.
+        """
+        now = now or datetime.now(UTC)
+        response = self._client.get_metric_statistics(
+            Namespace="AWS/ApplicationELB",
+            MetricName="RequestCount",
+            Dimensions=[
+                {"Name": "LoadBalancer", "Value": load_balancer},
+                {"Name": "TargetGroup", "Value": target_group},
+            ],
+            StartTime=now - timedelta(seconds=period_s * 3),
+            EndTime=now,
+            Period=period_s,
+            Statistics=["Sum"],
+        )
+        points = response.get("Datapoints", [])
+        if not points:
+            return None
+        point = max(points, key=lambda item: item["Timestamp"])
+        timestamp = point["Timestamp"]
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        age_s = (now - timestamp).total_seconds()
+        if age_s < 0 or age_s > stale_after_s:
+            return None
+        request_count = max(0.0, float(point.get("Sum", 0.0)))
+        return {
+            "timestamp": timestamp,
+            "request_count": request_count,
+            "requests_per_min": request_count * 60.0 / max(period_s, 1),
+            "interval_s": float(period_s),
+            "age_s": age_s,
+            "source": "aws_cloudwatch_alb",
+            "provenance": "measured",
+        }

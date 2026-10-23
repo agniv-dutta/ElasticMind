@@ -76,6 +76,9 @@ export default function App() {
           <span>Gateway: {systemStatus?.gateway_connected ? 'connected' : 'not connected'}</span>
           <span>URL: {systemStatus?.gateway_url || config?.GATEWAY_URL || '?'}</span>
           <span>Last sync: {systemStatus?.gateway_last_sync || 'not synced yet'}</span>
+          <span>Telemetry: {systemStatus?.telemetry_source || 'none'} ({systemStatus?.telemetry_status || 'waiting'})</span>
+          <span>Forecast: {systemStatus?.forecast_source || 'none'}</span>
+          <span>Actuator: {systemStatus?.actuator_status || 'unknown'}</span>
           <span>Policy: {config?.current_policy || '?'}</span>
           <span>Load: {systemStatus?.current_rpm ?? 0} rpm</span>
           {(() => {
@@ -87,6 +90,7 @@ export default function App() {
               : Math.max(0, Math.ceil((need - hp) * (fc?.sample_interval_s || config?.sample_interval_s || 5) / 60));
             return <span>history {hp}/{need}{ready ? ' (ML ready)' : ', ETA ' + eta + ' min'}</span>;
           })()}
+        </section>
       <section className='mb-4 bg-slate-900 rounded p-3 flex flex-wrap gap-2 items-center'>
         <span className='text-sm'>Policy</span>
         <select value={policy} onChange={function(e:any){setPolicy(e.target.value);}} className='bg-slate-800 rounded px-2 py-1'>

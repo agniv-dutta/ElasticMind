@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 import boto3
 import pytest
@@ -105,6 +106,49 @@ def test_cloudwatch_publish_and_read() -> None:
         names = {m["MetricName"] for m in metrics["Metrics"]}
         assert {"PredictedLoad", "ActualLoad", "DesiredCapacity", "RunningCapacity",
                 "ForecastMAPE", "SLAViolations", "EstimatedCost"} <= names
+
+
+class FakeCloudWatch:
+    def __init__(self, points):
+        self.points = points
+
+    def get_metric_statistics(self, **kwargs):
+        return {"Datapoints": self.points}
+
+
+def test_cloudwatch_workload_sample_converts_request_count_to_rpm() -> None:
+    now = datetime.now(UTC)
+    client = FakeCloudWatch([{"Timestamp": now - timedelta(seconds=30), "Sum": 120}])
+    sample = CloudWatchMetricsPublisher(client=client).read_workload_sample(
+        "app/elasticmind-alb/abc", "targetgroup/elasticmind-tg/def", now=now
+    )
+    assert sample is not None
+    assert sample["requests_per_min"] == 120
+    assert sample["interval_s"] == 60.0
+    assert sample["provenance"] == "measured"
+
+
+def test_cloudwatch_workload_sample_rejects_missing_or_stale_points() -> None:
+    now = datetime.now(UTC)
+    missing = CloudWatchMetricsPublisher(client=FakeCloudWatch([])).read_workload_sample(
+        "alb", "tg", now=now
+    )
+    stale = CloudWatchMetricsPublisher(client=FakeCloudWatch([
+        {"Timestamp": now - timedelta(seconds=181), "Sum": 120}
+    ])).read_workload_sample("alb", "tg", now=now)
+    assert missing is None
+    assert stale is None
+
+
+def test_actuator_errors_are_not_reported_as_success(ecs_with_service) -> None:
+    class BrokenClient:
+        def describe_services(self, **kwargs):
+            raise TimeoutError("unreachable")
+
+    act = AwsEcsActuator(client=BrokenClient(), cluster=CLUSTER, service=SERVICE)
+    assert act.last_error and "ECS describe failed" in act.last_error
+    with pytest.raises(RuntimeError, match="ECS describe failed"):
+        act.set_desired(3)
 
 
 def test_s3_model_store_roundtrip(tmp_path: Path) -> None:

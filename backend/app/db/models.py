@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import (
     JSON,
@@ -79,6 +80,9 @@ class Experiment(Base):
 
 
 def get_engine(db_url: str):
+    if db_url.startswith("sqlite:///") and not db_url.endswith(":memory:"):
+        database_path = Path(db_url.replace("sqlite:///", "", 1))
+        database_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(
         db_url,
         connect_args={"check_same_thread": False} if db_url.startswith("sqlite") else {},

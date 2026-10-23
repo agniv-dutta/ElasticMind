@@ -42,5 +42,7 @@ class AutoscalerConfig:
             fast_scale_up_cooldown_s=int(getattr(s, "COOLDOWN_UP_S", getattr(s, "fast_scale_up_cooldown_s", 30))),
             slow_scale_down_cooldown_s=int(getattr(s, "COOLDOWN_DOWN_S", getattr(s, "slow_scale_down_cooldown_s", 120))),
             hysteresis=getattr(s, "hysteresis", 0.05),
-            provisioning_delay_s=getattr(s, "STARTUP_DELAY_S", getattr(s, "provisioning_delay_s", 90.0)),
+            provisioning_delay_s=s.scaled_delay(
+                getattr(s, "STARTUP_DELAY_S", getattr(s, "provisioning_delay_s", 90.0))
+            ),
         )

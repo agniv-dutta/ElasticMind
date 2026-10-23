@@ -63,6 +63,10 @@ class LiveMetrics:
         self.running_replicas = 1
         self.sla_violation_minutes = 0.0
         self.history: deque[tuple[datetime, float]] = deque(maxlen=480)
+        self.telemetry_source = "none"
+        self.telemetry_status = "waiting"
+        self.last_telemetry_at: datetime | None = None
+        self.last_telemetry_error: str | None = None
 
 live_metrics = LiveMetrics()
 logger = logging.getLogger("elasticmind.control")
@@ -78,6 +82,9 @@ actuator_limiter = RateLimiter(rate_per_sec=1 / max(settings.scaled_delay(settin
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.metrics_pub = None
+    app.state.telemetry_source = "none"
+    app.state.forecast_source = "none"
+    app.state.actuator_status = "initializing"
     if settings.ACTUATOR == "aws":
         try:
             from backend.app.aws.metrics import CloudWatchMetricsPublisher
@@ -196,7 +203,7 @@ def active_config():
         p = Path("configs/calibration.yaml")
         if not p.exists():
             p = Path(__file__).resolve().parents[2] / "configs" / "calibration.yaml"
-        if p.exists():
+        if settings.PROFILE in {"local_demo", "aws_demo"} and p.exists():
             data = yaml.safe_load(p.read_text(encoding="utf-8-sig")) or {}
             v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
             if v is not None:
@@ -211,6 +218,7 @@ def active_config():
     cfg = AutoscalerConfig.from_settings(settings)
     data = settings.model_dump(by_alias=False)
     return {"profile": settings.PROFILE, "time_scale": settings.TIME_SCALE,
+            "PROFILE": settings.PROFILE, "TIME_SCALE": settings.TIME_SCALE,
             "actuator": settings.ACTUATOR, "model_version": settings.selected_model_path,
             "autoscaler_running": not getattr(getattr(app.state, "loop_task", None), "done",
 lambda: True)(),
@@ -250,6 +258,12 @@ async def system_status():
         "gateway_last_sync": getattr(app.state, "gateway_last_sync_at", None),
         "requests_received": live_metrics.request_count,
         "current_rpm": round(live_metrics.requests_per_min, 1),
+        "telemetry_source": live_metrics.telemetry_source,
+        "telemetry_status": live_metrics.telemetry_status,
+        "last_telemetry_at": live_metrics.last_telemetry_at,
+        "telemetry_error": live_metrics.last_telemetry_error,
+        "forecast_source": getattr(app.state, "forecast_source", "none"),
+        "actuator_status": getattr(app.state, "actuator_status", "unknown"),
     }
 
 
@@ -288,7 +302,17 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
         "sample_interval_s": round(sample_interval_s, 2),
     }
     if len(history_rows) < min_points:
-        return {"model": "reactive-fallback", "history": history, "forecast": [],
+        latest = float(history_rows[-1][1]) if history_rows else 0.0
+        fallback_forecast = [
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "horizon_min": horizon,
+                "p50": latest,
+                "p90": latest,
+            }
+            for horizon in (5, 15, 30)
+        ]
+        return {"model": "reactive-fallback", "history": history, "forecast": fallback_forecast,
                 "decision_source": "fallback", "forecast_fallback": "insufficient_live_history",
                 "unit": "rpm", "history_points": len(history_rows), **history_meta}
     try:
@@ -414,6 +438,10 @@ def receive_metrics(data: dict):
     if live_metrics.latency_p95_ms > settings.SLA_LATENCY_MS:
         live_metrics.sla_violation_minutes += (duration_s / 60.0)
     live_metrics.timestamp = datetime.now(UTC)
+    live_metrics.telemetry_source = "local_gateway"
+    live_metrics.telemetry_status = "fresh"
+    live_metrics.last_telemetry_at = live_metrics.timestamp
+    live_metrics.last_telemetry_error = None
     live_metrics.history.append((live_metrics.timestamp, live_metrics.requests_per_min))
     return {"status": "received", "source": "gateway", "measured": True}
 
@@ -433,12 +461,14 @@ def metrics_current():
         util = None
         latency_ms = live_metrics.latency_p50_ms
         metric_source = "measured"
+        latency_source = "measured" if live_metrics.telemetry_source == "local_gateway" else "estimated"
     else:
         # Fallback to synthetic baseline when no loadgen data
         util = None
         latency_ms = 0.0
         sla_count = 0
         metric_source = "simulated"
+        latency_source = "simulated"
     
     metric_values = calculate_metrics(
         demand=live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0,
@@ -449,7 +479,11 @@ def metrics_current():
         price_per_second=settings.PRICE_PER_REPLICA_HOUR / 3600.0,
         dt_seconds=settings.CONTROL_INTERVAL_S, idle_w=settings.IDLE_WATTS,
         peak_w=settings.PEAK_WATTS,
-        measured_latency_ms=latency_ms if live_metrics.request_count > 0 else None,
+        measured_latency_ms=(
+            latency_ms
+            if live_metrics.request_count > 0 and live_metrics.telemetry_source == "local_gateway"
+            else None
+        ),
     )
     util = metric_values.utilization
     latency_ms = metric_values.latency_ms
@@ -465,9 +499,10 @@ def metrics_current():
         sla_count=sla_count,
         timestamp=now,
         provenance={"utilization": metric_source, "sla_count": metric_source,
-                    "latency_ms": metric_source, "cost_usd": "simulated",
+                    "latency_ms": latency_source, "cost_usd": "estimated",
                     "energy_kwh": "simulated", "error_rate": metric_source,
-                    "request_count": metric_source, "running_replicas": "measured"},
+                    "request_count": metric_source, "running_replicas": "measured",
+                    "telemetry_source": live_metrics.telemetry_source},
         energy_label="estimated",
         request_count=live_metrics.request_count,
         error_rate=live_metrics.error_rate,
@@ -595,6 +630,59 @@ def audit():
     return audit_log.read()
 
 
+async def _refresh_aws_telemetry(app: FastAPI) -> str | None:
+    """Append one fresh ALB RequestCount sample when AWS mode is enabled."""
+    if settings.ACTUATOR != "aws":
+        return None
+    publisher = getattr(app.state, "metrics_pub", None)
+    if publisher is None:
+        reason = "aws_cloudwatch_unavailable"
+        live_metrics.telemetry_status = "error"
+        live_metrics.last_telemetry_error = reason
+        return reason
+    if not settings.AWS_ALB_LOAD_BALANCER or not settings.AWS_ALB_TARGET_GROUP:
+        reason = "aws_telemetry_not_configured"
+        live_metrics.telemetry_status = "error"
+        live_metrics.last_telemetry_error = reason
+        return reason
+    try:
+        sample = await asyncio.to_thread(
+            publisher.read_workload_sample,
+            settings.AWS_ALB_LOAD_BALANCER,
+            settings.AWS_ALB_TARGET_GROUP,
+            settings.AWS_TELEMETRY_PERIOD_S,
+            settings.AWS_TELEMETRY_STALE_AFTER_S,
+        )
+    except Exception as exc:
+        reason = f"aws_telemetry_read_failed: {type(exc).__name__}"
+        live_metrics.telemetry_status = "error"
+        live_metrics.last_telemetry_error = reason
+        return reason
+    if sample is None:
+        reason = "aws_telemetry_missing_or_stale"
+        live_metrics.telemetry_status = "stale"
+        live_metrics.last_telemetry_error = reason
+        return reason
+    timestamp = sample["timestamp"]
+    if live_metrics.last_telemetry_at is not None and timestamp <= live_metrics.last_telemetry_at:
+        reason = "aws_telemetry_duplicate"
+        live_metrics.telemetry_status = "stale"
+        live_metrics.last_telemetry_error = reason
+        return reason
+    live_metrics.requests_per_min = float(sample["requests_per_min"])
+    live_metrics.request_count = int(round(sample["request_count"]))
+    live_metrics.success_rate = 1.0
+    live_metrics.error_rate = 0.0
+    live_metrics.timestamp = timestamp
+    live_metrics.last_telemetry_at = timestamp
+    live_metrics.telemetry_source = sample["source"]
+    live_metrics.telemetry_status = "fresh"
+    live_metrics.last_telemetry_error = None
+    live_metrics.history.append((timestamp, live_metrics.requests_per_min))
+    app.state.telemetry_source = sample["source"]
+    return None
+
+
 async def control_loop_worker(app: FastAPI):
     """Run forecast → candidate generation → source selection → action → persistence."""
     cfg = AutoscalerConfig.from_settings(settings)
@@ -607,12 +695,14 @@ async def control_loop_worker(app: FastAPI):
         while True:
             await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
             try:
-                hist = generate_workload(profile="diurnal", days=1, seed=42)[["timestamp", "requests"]]
+                telemetry_failure = await _refresh_aws_telemetry(app)
                 actual = live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0
                 current = act.current()
                 loop.state.current_instances = current
                 latency = live_metrics.latency_p95_ms if live_metrics.request_count > 0 else 0.0
-                utilization = live_metrics.utilization if live_metrics.request_count > 0 else calculate_metrics(
+                utilization = (live_metrics.utilization
+                               if live_metrics.request_count > 0 and settings.ACTUATOR != "aws"
+                               else calculate_metrics(
                     demand=actual, served_load=actual, running_replicas=current,
                     capacity_per_replica=cfg.capacity_per_instance,
                     service_rate=cfg.capacity_per_instance,
@@ -622,12 +712,17 @@ async def control_loop_worker(app: FastAPI):
                     dt_seconds=settings.CONTROL_INTERVAL_S,
                     idle_w=settings.IDLE_WATTS, peak_w=settings.PEAK_WATTS,
                     measured_latency_ms=latency if live_metrics.request_count > 0 else None,
-                ).utilization
+                ).utilization)
+                if settings.ACTUATOR == "aws":
+                    live_metrics.running_replicas = current
+                    live_metrics.utilization = utilization
                 p50 = p90 = None
                 horizon = settings.FORECAST_HORIZON_MIN
                 model_version = None
-                failure = None
+                failure = telemetry_failure
                 try:
+                    if failure is not None:
+                        raise ValueError(failure)
                     history_rows = list(live_metrics.history)
                     if len(history_rows) < settings.min_history_points:
                         raise ValueError(f"insufficient_live_history: {len(history_rows)}/{settings.min_history_points} samples")
@@ -646,6 +741,7 @@ async def control_loop_worker(app: FastAPI):
                     if getattr(app.state, "forecast_fallback", None):
                         logger.info("Forecast recovered; returning to ML-led control")
                     app.state.forecast_fallback = None
+                    app.state.forecast_source = live_metrics.telemetry_source
                 except Exception as exc:
                     failure = f"{type(exc).__name__}: {exc}"
                     if failure.startswith("ValueError: insufficient_live_history"):
@@ -654,6 +750,7 @@ async def control_loop_worker(app: FastAPI):
                     else:
                         logger.exception("FORECAST FAILURE: using reactive fallback for this control tick")
                     app.state.forecast_fallback = failure
+                    app.state.forecast_source = "fallback"
 
                 tick = pipeline.tick(
                     observed_load=actual,
@@ -703,9 +800,15 @@ async def control_loop_worker(app: FastAPI):
                     db.commit()
                 safety_override = tick.decision_source == "safety_net"
                 if safety_override or actuator_limiter.allow():
-                    action = act.set_desired(final, force=safety_override)
-                    loop.state.current_instances = action.desired
-                    audit_log.record(action.desired, action.current, action.reason, tick.reason)
+                    try:
+                        action = act.set_desired(final, force=safety_override)
+                        loop.state.current_instances = action.desired
+                        app.state.actuator_status = "healthy"
+                        audit_log.record(action.desired, action.current, action.reason, tick.reason)
+                    except Exception as exc:
+                        app.state.actuator_status = f"error: {type(exc).__name__}"
+                        logger.exception("ACTUATOR FAILED: desired=%s", final)
+                        continue
                 gateway_replicas = (
                     act.get_state().running if hasattr(act, "get_state") else act.current()
                 )

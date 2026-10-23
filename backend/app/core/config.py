@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -69,6 +70,10 @@ class Settings(BaseSettings):
     ecs_service: str = "elasticmind-target"
     model_s3_uri: str = ""
     GATEWAY_URL: str = "http://localhost:8001"
+    AWS_ALB_LOAD_BALANCER: str = ""
+    AWS_ALB_TARGET_GROUP: str = ""
+    AWS_TELEMETRY_PERIOD_S: int = Field(default=60, ge=1)
+    AWS_TELEMETRY_STALE_AFTER_S: int = Field(default=180, ge=1)
 
     @classmethod
     def settings_customise_sources(
@@ -88,29 +93,31 @@ class Settings(BaseSettings):
     def valid_replica_range(self) -> Settings:
         if self.MAX_REPLICAS < self.MIN_REPLICAS:
             raise ValueError("MAX_REPLICAS must be >= MIN_REPLICAS")
-        # Load calibration if present
+        # Load calibration if present, unless the capacity was explicitly set
+        # through the environment, which has higher precedence.
         try:
             from pathlib import Path
             import yaml
-            p = Path("configs/calibration.yaml")
-            if not p.is_absolute():
-                # try relative to cwd or repo root
-                if not p.exists():
-                    p = Path(__file__).resolve().parents[3] / "configs" / "calibration.yaml"
-            if p.exists():
-                data = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
-                v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
-                if v is not None:
-                    val = float(v)
-                    self.CAPACITY_PER_REPLICA_RPM = val
-                    try:
-                        self.capacity_per_instance = val
-                    except Exception:
-                        pass
-                    try:
-                        self.capacity_per_replica = val
-                    except Exception:
-                        pass
+            if self.PROFILE in {"local_demo", "aws_demo"} and "ELASTICMIND_CAPACITY_PER_REPLICA_RPM" not in os.environ:
+                p = Path("configs/calibration.yaml")
+                if not p.is_absolute():
+                    # try relative to cwd or repo root
+                    if not p.exists():
+                        p = Path(__file__).resolve().parents[3] / "configs" / "calibration.yaml"
+                if p.exists():
+                    data = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
+                    v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
+                    if v is not None:
+                        val = float(v)
+                        self.CAPACITY_PER_REPLICA_RPM = val
+                        try:
+                            self.capacity_per_instance = val
+                        except Exception:
+                            pass
+                        try:
+                            self.capacity_per_replica = val
+                        except Exception:
+                            pass
         except Exception:
             pass
         return self
@@ -184,7 +191,7 @@ try:
     p = Path("configs/calibration.yaml")
     if not p.exists():
         p = Path(__file__).resolve().parents[3] / "configs" / "calibration.yaml"
-    if p.exists():
+    if settings.PROFILE in {"local_demo", "aws_demo"} and p.exists():
         data = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
         v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
         if v is not None:

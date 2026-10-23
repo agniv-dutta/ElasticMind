@@ -15,6 +15,7 @@ class AwsEcsActuator(CapacityActuator):
         self._up_cd = float(kwargs.get("scale_up_cooldown_s", 30))
         self._down_cd = float(kwargs.get("scale_down_cooldown_s", 120))
         self._last_action_ts = None
+        self.last_error: str | None = None
         self._ecs = kwargs.get("client") or boto3.client("ecs", region_name=kwargs.get("region", "us-east-1"))
         self._desired = self._running = self._min
         self._refresh()
@@ -25,21 +26,35 @@ class AwsEcsActuator(CapacityActuator):
             if services:
                 self._desired = int(services[0].get("desiredCount", self._desired))
                 self._running = int(services[0].get("runningCount", self._running)) or self._desired
-        except Exception:
-            pass
+            else:
+                self.last_error = f"ECS service not found: {self.cluster}/{self.service}"
+                return False
+            self.last_error = None
+            return True
+        except Exception as exc:
+            self.last_error = f"ECS describe failed: {type(exc).__name__}: {exc}"
+            return False
 
     def set_desired(self, desired: int, now: float | None = None, force: bool = False) -> ScalingAction:
         now = time.time() if now is None else now
-        self._refresh()
+        if not self._refresh():
+            raise RuntimeError(self.last_error or "ECS service state unavailable")
         current = self._running
         target = max(self._min, min(self._max, int(desired)))
-        if self._last_action_ts is not None and not force and target != current:
+        if self._last_action_ts is not None and not force and target != self._desired:
             cooldown = self._up_cd if target > current else self._down_cd
             if now - self._last_action_ts < cooldown:
                 return ScalingAction(self._desired, current, "cooldown", now)
-        self._ecs.update_service(cluster=self.cluster, service=self.service, desiredCount=target)
+        if target == self._desired and not force:
+            return ScalingAction(self._desired, current, "no_change", now)
+        try:
+            self._ecs.update_service(cluster=self.cluster, service=self.service, desiredCount=target)
+        except Exception as exc:
+            self.last_error = f"ECS update failed: {type(exc).__name__}: {exc}"
+            raise RuntimeError(self.last_error) from exc
         self._desired = target
         self._last_action_ts = now
+        self.last_error = None
         return ScalingAction(target, current, f"ecs_set {current}->{target}", now)
 
     def get_state(self) -> ActuatorState:
