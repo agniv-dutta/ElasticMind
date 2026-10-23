@@ -1,0 +1,17 @@
+﻿CAPACITY_PER_REPLICA_RPM: 80.0
+sla_ms: 200.0
+margin: 0.20
+ramp:
+- rpm: 10
+  p95_ms: 50.0
+  p50_ms: 30.0
+  ok: 1.0
+- rpm: 50
+  p95_ms: 80.0
+  p50_ms: 45.0
+  ok: 1.0
+- rpm: 100
+  p95_ms: 250.0
+  p50_ms: 120.0
+  ok: 0.9
+note: "calibrated"

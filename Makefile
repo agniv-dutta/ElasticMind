@@ -73,3 +73,6 @@ check-py:
 demo:
 	python -m experiments.run_live --profile diurnal --repeats 3
 
+
+smoke-scale:
+	powershell -ExecutionPolicy Bypass -File scripts/smoke_scale.ps1

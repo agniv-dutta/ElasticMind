@@ -179,6 +179,7 @@ async def run_continuous(
         started = time.monotonic()
         next_report = started + 10.0
         next_send = started
+        last_phase = None
         while True:
             # Surface worker failures quickly (especially a gateway going away).
             completed = [task for task in tasks if task.done()]
@@ -189,10 +190,23 @@ async def run_continuous(
             elapsed = now - started
             if profile == "ramp":
                 target_rpm = 60.0 + 540.0 * min(elapsed / 300.0, 1.0)
+                current_phase = "ramp"
             elif profile == "spike":
-                target_rpm = 480.0 if 60.0 <= elapsed < 180.0 else 60.0
+                if elapsed < 180.0:
+                    target_rpm = 60.0
+                    current_phase = "steady"
+                elif elapsed < 300.0:
+                    target_rpm = 480.0
+                    current_phase = "spike"
+                else:
+                    target_rpm = 60.0
+                    current_phase = "steady"
             else:
                 target_rpm = 60.0
+                current_phase = "steady"
+            if current_phase != last_phase:
+                print(f"loadgen phase change: {profile} -> {current_phase} at {elapsed:.0f}s, target {target_rpm:.0f} rpm", flush=True)
+                last_phase = current_phase
             target_rpm *= speed_factor
             interval = 60.0 / target_rpm
             if now >= next_send:

@@ -61,6 +61,7 @@ class LiveMetrics:
         self.error_rate = 0.0
         self.utilization = 0.0
         self.running_replicas = 1
+        self.sla_violation_minutes = 0.0
         self.history: deque[tuple[datetime, float]] = deque(maxlen=480)
 
 live_metrics = LiveMetrics()
@@ -188,13 +189,40 @@ def health():
 @app.get("/config")
 def active_config():
     """Return the effective shared configuration (YAML plus environment overrides)."""
+    # reload calibration if present
+    try:
+        from pathlib import Path
+        import yaml
+        p = Path("configs/calibration.yaml")
+        if not p.exists():
+            p = Path(__file__).resolve().parents[2] / "configs" / "calibration.yaml"
+        if p.exists():
+            data = yaml.safe_load(p.read_text(encoding="utf-8-sig")) or {}
+            v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
+            if v is not None:
+                val = float(v)
+                settings.CAPACITY_PER_REPLICA_RPM = val
+                try:
+                    settings.capacity_per_instance = val
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    cfg = AutoscalerConfig.from_settings(settings)
+    data = settings.model_dump(by_alias=False)
     return {"profile": settings.PROFILE, "time_scale": settings.TIME_SCALE,
             "actuator": settings.ACTUATOR, "model_version": settings.selected_model_path,
-            "autoscaler_running": not getattr(getattr(app.state, "loop_task", None), "done", lambda: True)(),
+            "autoscaler_running": not getattr(getattr(app.state, "loop_task", None), "done",
+lambda: True)(),
             "last_tick_time": getattr(app.state, "last_tick_time", None),
-            "traffic_source": "gateway_connected" if getattr(app.state, "gateway_synced_replicas", None) is not None else "gateway_disconnected",
+            "traffic_source": "gateway_connected" if getattr(app.state,
+"gateway_synced_replicas", None) is not None else "gateway_disconnected",
             "current_policy": settings.policy,
-            **settings.model_dump()}
+            "CAPACITY_PER_REPLICA_RPM": cfg.capacity_per_instance,
+            "scale_up_threshold_rpm": round(cfg.capacity_per_instance * cfg.target_utilization, 2),
+            "min_history_points": settings.min_history_points,
+            "sample_interval_s": round(settings.CONTROL_INTERVAL_S / settings.TIME_SCALE, 2),
+            **{k:v for k,v in data.items() if k not in {"profile","PROFILE"}}}
 
 
 @app.get("/status")
@@ -252,16 +280,23 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
     req = req or PredictRequest()
     history_rows = list(live_metrics.history)
     history = [{"timestamp": ts.isoformat(), "actual": float(value)} for ts, value in history_rows[-360:]]
-    if len(history_rows) < 60:
+    min_points = settings.min_history_points
+    sample_interval_s = settings.CONTROL_INTERVAL_S / settings.TIME_SCALE
+    history_meta = {
+        "min_history_points": min_points,
+        "history_eta_seconds": round(settings.history_eta_seconds(len(history_rows)), 1),
+        "sample_interval_s": round(sample_interval_s, 2),
+    }
+    if len(history_rows) < min_points:
         return {"model": "reactive-fallback", "history": history, "forecast": [],
                 "decision_source": "fallback", "forecast_fallback": "insufficient_live_history",
-                "unit": "rpm", "history_points": len(history_rows)}
+                "unit": "rpm", "history_points": len(history_rows), **history_meta}
     try:
         model = load_predictor(settings.selected_model_path)
     except Exception as e:
         return {"model": "reactive-fallback", "history": history, "forecast": [],
                 "decision_source": "fallback", "forecast_fallback": f"model_load_failed: {type(e).__name__}",
-                "unit": "rpm", "history_points": len(history_rows)}
+                "unit": "rpm", "history_points": len(history_rows), **history_meta}
 
     # Forecast live demand in the same requests-per-minute units reported by the gateway.
     hist = __import__("pandas").DataFrame(
@@ -286,7 +321,8 @@ def predict(req: PredictRequest | None = None, db: Session = Depends(get_db)):
         )
     db.commit()
     return {"model": fc.model, "history": history, "forecast": points,
-            "decision_source": "ml", "unit": "rpm", "history_points": len(history_rows)}
+            "decision_source": "ml", "unit": "rpm", "history_points": len(history_rows),
+            **history_meta}
 
 
 @app.get("/explain")
@@ -374,6 +410,9 @@ def receive_metrics(data: dict):
     live_metrics.utilization = data.get("utilization", 0.0)
     live_metrics.running_replicas = int(data.get("running_replicas", 1))
     live_metrics.request_count = data.get("requests_total", 0)
+    # accumulate SLA violation minutes roughly from p95 breach
+    if live_metrics.latency_p95_ms > settings.SLA_LATENCY_MS:
+        live_metrics.sla_violation_minutes += (duration_s / 60.0)
     live_metrics.timestamp = datetime.now(UTC)
     live_metrics.history.append((live_metrics.timestamp, live_metrics.requests_per_min))
     return {"status": "received", "source": "gateway", "measured": True}
@@ -417,6 +456,7 @@ def metrics_current():
     sla_count = metric_values.sla_violations
     cost_usd = metric_values.cost_usd
     energy_kwh = metric_values.energy_kwh_estimated
+    history_points = len(live_metrics.history)
     return MetricsResponse(
         current_utilization=util,
         latency_ms=latency_ms,
@@ -432,6 +472,10 @@ def metrics_current():
         request_count=live_metrics.request_count,
         error_rate=live_metrics.error_rate,
         running_replicas=live_metrics.running_replicas,
+        sla_violation_minutes=round(live_metrics.sla_violation_minutes, 4),
+        min_history_points=settings.min_history_points,
+        history_points=history_points,
+        history_eta_seconds=round(settings.history_eta_seconds(history_points), 1),
     )
 
 
@@ -585,8 +629,8 @@ async def control_loop_worker(app: FastAPI):
                 failure = None
                 try:
                     history_rows = list(live_metrics.history)
-                    if len(history_rows) < 60:
-                        raise ValueError(f"insufficient_live_history: {len(history_rows)}/60 samples")
+                    if len(history_rows) < settings.min_history_points:
+                        raise ValueError(f"insufficient_live_history: {len(history_rows)}/{settings.min_history_points} samples")
                     import pandas as pd
                     hist = pd.DataFrame(
                         [(ts, rpm) for ts, rpm in history_rows],

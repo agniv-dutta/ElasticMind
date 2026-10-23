@@ -68,3 +68,6 @@ python -m experiments.aws_run --alb-dns <alb_dns_name> --duration 120
 - Predictive provisioning removes the reactive lag; safeguards cover wrong predictions.
 - Cost/energy figures are model estimates (simulated), not AWS billing.
 - Everything runs from one repo: ML, backend, dashboard, loadgen, infra.
+## Live sampling
+
+- Sample interval: 5 seconds (CONTROL_INTERVAL_S). For profile local_demo, ML needs >= 60 samples (~5 minutes at 5s intervals). With TIME_SCALE>1 this time compresses.

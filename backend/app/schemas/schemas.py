@@ -21,6 +21,9 @@ class PredictResponse(BaseModel):
     forecast_fallback: str | None = None
     unit: str = "rpm"
     history_points: int = 0
+    min_history_points: int = 60
+    history_eta_seconds: float = 0.0
+    sample_interval_s: float = 5.0
 
 
 class ForecastPoint(BaseModel):
@@ -63,6 +66,10 @@ class MetricsResponse(BaseModel):
     request_count: int = 0
     error_rate: float = 0.0
     running_replicas: int = 1
+    sla_violation_minutes: float = 0.0
+    min_history_points: int = 60
+    history_points: int = 0
+    history_eta_seconds: float = 0.0
 
 
 class HistoryQuery(BaseModel):

@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     SAFETY_LATENCY_BREACH_TICKS: int = Field(default=3, ge=1)
     SAFETY_LATENCY_WINDOW_SIZE: int = Field(default=5, ge=1)
     ERROR_RATE_THRESHOLD: float = Field(default=0.05, ge=0, le=1)
+    # Live history required before ML takes over. None => profile default.
+    MIN_HISTORY_POINTS: int | None = None
+    ML_WARMUP_TARGET_S: float = Field(default=300.0, gt=0)
+    # Aliases for AutoscalerConfig compatibility
+    min_instances: int | None = None
+    max_instances: int | None = None
+    target_utilization: float | None = None
+    fast_scale_up_cooldown_s: float | None = None
+    slow_scale_down_cooldown_s: float | None = None
+    hysteresis: float | None = None
+    provisioning_delay_s: float | None = None
+    capacity_per_instance: float | None = None
+    capacity_per_replica: float | None = None
 
     # Operational settings which are not part of the shared simulation contract.
     env: str = "development"
@@ -75,11 +88,55 @@ class Settings(BaseSettings):
     def valid_replica_range(self) -> Settings:
         if self.MAX_REPLICAS < self.MIN_REPLICAS:
             raise ValueError("MAX_REPLICAS must be >= MIN_REPLICAS")
+        # Load calibration if present
+        try:
+            from pathlib import Path
+            import yaml
+            p = Path("configs/calibration.yaml")
+            if not p.is_absolute():
+                # try relative to cwd or repo root
+                if not p.exists():
+                    p = Path(__file__).resolve().parents[3] / "configs" / "calibration.yaml"
+            if p.exists():
+                data = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
+                v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
+                if v is not None:
+                    val = float(v)
+                    self.CAPACITY_PER_REPLICA_RPM = val
+                    try:
+                        self.capacity_per_instance = val
+                    except Exception:
+                        pass
+                    try:
+                        self.capacity_per_replica = val
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         return self
 
     def scaled_delay(self, seconds: float) -> float:
         """Convert simulated seconds into wall-clock seconds at TIME_SCALE."""
         return seconds / self.TIME_SCALE
+
+    @property
+    def min_history_points(self) -> int:
+        """Samples needed before the ML model takes over.
+
+        Uses MIN_HISTORY_POINTS when set. Otherwise aims for ML ready within
+        ~3 minutes for ``local_demo`` and ML_WARMUP_TARGET_S (5 min) elsewhere.
+        Sample interval is CONTROL_INTERVAL_S / TIME_SCALE.
+        """
+        if self.MIN_HISTORY_POINTS is not None:
+            return max(1, int(self.MIN_HISTORY_POINTS))
+        target_s = 180.0 if self.PROFILE == "local_demo" else self.ML_WARMUP_TARGET_S
+        interval_s = max(self.CONTROL_INTERVAL_S / self.TIME_SCALE, 1e-6)
+        return max(1, int(round(target_s / interval_s)))
+
+    def history_eta_seconds(self, points: int) -> float:
+        """Wall-clock seconds remaining until ML can take over."""
+        remaining = max(0, self.min_history_points - int(points))
+        return remaining * max(self.CONTROL_INTERVAL_S / self.TIME_SCALE, 0.0)
 
     @property
     def selected_model_path(self) -> str:
@@ -98,7 +155,7 @@ class Settings(BaseSettings):
         return Path("backend/data/elasticmind.db")
 
 
-def load_capacity_from_yaml(settings, path="configs/calibration.yaml"):
+def load_capacity_from_yaml(settings_obj, path="configs/calibration.yaml"):
     try:
         from pathlib import Path
 
@@ -108,13 +165,38 @@ def load_capacity_from_yaml(settings, path="configs/calibration.yaml"):
             data = yaml.safe_load(p.read_text()) or {}
             v = data.get("CAPACITY_PER_REPLICA_RPM")
             if v is not None:
-                settings.capacity_per_instance = float(v)
-                if hasattr(settings, "CAPACITY_PER_REPLICA_RPM"):
-                    settings.CAPACITY_PER_REPLICA_RPM = float(v)
+                try:
+                    settings_obj.capacity_per_instance = float(v)
+                except Exception:
+                    pass
+                if hasattr(settings_obj, "CAPACITY_PER_REPLICA_RPM"):
+                    settings_obj.CAPACITY_PER_REPLICA_RPM = float(v)
     except Exception:
         pass
 
+
+# Create a module-level settings instance used by imports
+settings = Settings()
 try:
-    load_capacity_from_yaml(Settings())
+    # reload calibration
+    from pathlib import Path
+    import yaml
+    p = Path("configs/calibration.yaml")
+    if not p.exists():
+        p = Path(__file__).resolve().parents[3] / "configs" / "calibration.yaml"
+    if p.exists():
+        data = yaml.safe_load(p.read_text(encoding='utf-8-sig')) or {}
+        v = data.get("CAPACITY_PER_REPLICA_RPM") or data.get("\ufeffCAPACITY_PER_REPLICA_RPM")
+        if v is not None:
+            val = float(v)
+            settings.CAPACITY_PER_REPLICA_RPM = val
+            try:
+                settings.capacity_per_instance = val
+            except Exception:
+                pass
+            try:
+                settings.capacity_per_replica = val
+            except Exception:
+                pass
 except Exception:
     pass

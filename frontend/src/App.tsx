@@ -66,17 +66,27 @@ export default function App() {
           <span>TIME_SCALE: {config?.time_scale ?? '?'}</span>
           <span>ACTUATOR: {config?.actuator || '?'}</span>
           <span>model version: {config?.model_version || '?'}</span>
+          <span>capacity/replica: {config?.CAPACITY_PER_REPLICA_RPM ?? '?'} rpm</span>
+          <span>scale-up threshold: {config?.scale_up_threshold_rpm ?? '?'} rpm</span>
         </div>
       </header>
-      <section className='mb-4 bg-slate-900 rounded p-3 flex flex-wrap gap-5 text-sm'>
-        <span>System status</span><span>Autoscaler: {config?.autoscaler_running ? 'running' : 'stopped'}</span>
-        <span>Last tick: {config?.last_tick_time || 'waiting for first tick'}</span>
-        <span>Gateway: {systemStatus?.gateway_connected ? 'connected' : 'not connected'}</span>
-        <span>URL: {systemStatus?.gateway_url || config?.GATEWAY_URL || '?'}</span>
-        <span>Last sync: {systemStatus?.gateway_last_sync || 'not synced yet'}</span>
-        <span>Policy: {config?.current_policy || '?'}</span>
-        <span>Load: {systemStatus?.current_rpm ?? 0} rpm</span>
-      </section>
+        <section className='mb-4 bg-slate-900 rounded p-3 flex flex-wrap gap-5 text-sm'>
+          <span>System status</span><span>Autoscaler: {config?.autoscaler_running ? 'running' : 'stopped'}</span>
+          <span>Last tick: {config?.last_tick_time || 'waiting for first tick'}</span>
+          <span>Gateway: {systemStatus?.gateway_connected ? 'connected' : 'not connected'}</span>
+          <span>URL: {systemStatus?.gateway_url || config?.GATEWAY_URL || '?'}</span>
+          <span>Last sync: {systemStatus?.gateway_last_sync || 'not synced yet'}</span>
+          <span>Policy: {config?.current_policy || '?'}</span>
+          <span>Load: {systemStatus?.current_rpm ?? 0} rpm</span>
+          {(() => {
+            var hp = fc?.history_points || 0;
+            var need = fc?.min_history_points || config?.min_history_points || 60;
+            var ready = hp >= need;
+            var eta = fc?.history_eta_seconds != null
+              ? Math.ceil(fc.history_eta_seconds / 60)
+              : Math.max(0, Math.ceil((need - hp) * (fc?.sample_interval_s || config?.sample_interval_s || 5) / 60));
+            return <span>history {hp}/{need}{ready ? ' (ML ready)' : ', ETA ' + eta + ' min'}</span>;
+          })()}
       <section className='mb-4 bg-slate-900 rounded p-3 flex flex-wrap gap-2 items-center'>
         <span className='text-sm'>Policy</span>
         <select value={policy} onChange={function(e:any){setPolicy(e.target.value);}} className='bg-slate-800 rounded px-2 py-1'>
@@ -95,25 +105,25 @@ export default function App() {
         <button onClick={function(){api.spike(spike, 5);}} className='px-2 py-1 bg-orange-700 rounded'>Inject spike</button>
       </section>
       <section className='grid grid-cols-1 md:grid-cols-2 gap-4 mb-4'>
-        <div className='bg-slate-900 rounded p-3'>
-          <h2 className='mb-2'>Replicas over the last 30 minutes</h2>
-          <ResponsiveContainer width='100%' height={220}>
-            <LineChart data={replicaData}>
-              <CartesianGrid strokeDasharray='3 3' />
-              <XAxis dataKey='timestamp' tickFormatter={function(v:any){return new Date(v).toLocaleTimeString();}} />
-              <YAxis />
-              <Tooltip />
-              <Legend />
-              <Line type='stepAfter' dataKey='desired' stroke='#60a5fa' dot={false} />
-              <Line type='stepAfter' dataKey='running' stroke='#22c55e' dot={false} />
-              <Line type='stepAfter' dataKey='starting' stroke='#f59e0b' dot={false} />
-              <Line type='stepAfter' dataKey='draining' stroke='#f43f5e' dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+          <div className='bg-slate-900 rounded p-3'>
+            <h2 className='mb-2'>Replicas over the last 30 minutes</h2>
+            <ResponsiveContainer width='100%' height={220}>
+              <LineChart data={replicaData.length > 0 ? replicaData : [{timestamp: new Date().toISOString(), desired: config?.MIN_REPLICAS || 1, running: 1, starting: 0, draining: 0}]}>
+                <CartesianGrid strokeDasharray='3 3' />
+                <XAxis dataKey='timestamp' tickFormatter={function(v:any){return new Date(v).toLocaleTimeString();}} />
+                <YAxis />
+                <Tooltip />
+                <Legend />
+                <Line type='stepAfter' dataKey='desired' stroke='#60a5fa' dot={true} />
+                <Line type='stepAfter' dataKey='running' stroke='#22c55e' dot={true} />
+                <Line type='stepAfter' dataKey='starting' stroke='#f59e0b' dot={true} />
+                <Line type='stepAfter' dataKey='draining' stroke='#f43f5e' dot={true} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
         <div className='bg-slate-900 rounded p-3'>
           <h2 className='mb-2'>Load forecast (rpm): actual and P50/P90 at horizon</h2>
-          {fc?.decision_source === 'fallback' && <p className='text-xs text-amber-300'>Reactive fallback while live history builds ({fc?.history_points || 0}/60 samples).</p>}
+          {fc?.decision_source === 'fallback' && <p className='text-xs text-amber-300'>Reactive fallback while live history builds ({fc?.history_points || 0}/{fc?.min_history_points || config?.min_history_points || 60} samples).</p>}
           <ResponsiveContainer width='100%' height={220}>
             <LineChart data={forecastData}>
               <CartesianGrid strokeDasharray='3 3' />
@@ -132,8 +142,8 @@ export default function App() {
         <div className='bg-slate-900 rounded p-2'>Util <Badge kind={mc?.provenance?.utilization || 'simulated'} /> {(mc && (mc.current_utilization!=null?mc.current_utilization:'-'))}</div>
         <div className='bg-slate-900 rounded p-2'>Latency p50/p95 <Badge kind='measured' /> {(mc && (mc.latency_p50_ms!=null?mc.latency_p50_ms:mc.latency_ms)) || '-'} / {(mc && mc.latency_p95_ms) || '-'}</div>
         <div className='bg-slate-900 rounded p-2'>SLA <Badge kind='simulated' /> {(mc && (mc.sla_count!=null?mc.sla_count:mc.sla_violations)) || 0}</div>
-        <div className='bg-slate-900 rounded p-2'>Cost <Badge kind='estimated' /> {(mc && mc.cost_usd) || '-'}</div>
-        <div className='bg-slate-900 rounded p-2'>Energy <Badge kind='simulated' /> {(mc && mc.energy_kwh) || '-'}</div>
+        <div className='bg-slate-900 rounded p-2'>Cost <Badge kind='estimated' /> ${ (mc && mc.cost_usd!=null)? Number(mc.cost_usd).toFixed(4) : '-'}</div>
+        <div className='bg-slate-900 rounded p-2'>Energy <Badge kind='simulated' /> {(mc && mc.energy_kwh!=null)? (Number(mc.energy_kwh)*1000.0).toFixed(4)+' Wh' : '-'}</div>
         <div className='bg-slate-900 rounded p-2'>Robust <span className='text-xs'>{(rob && rob.active_mode) || '-'}</span></div>
       </section>
       <section className='bg-slate-900 rounded p-3'>
