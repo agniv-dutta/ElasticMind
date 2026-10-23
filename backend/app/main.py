@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -85,6 +86,9 @@ async def lifespan(app: FastAPI):
     app.state.telemetry_source = "none"
     app.state.forecast_source = "none"
     app.state.actuator_status = "initializing"
+    app.state.loop_paused = False
+    app.state.forecast_bias_percent = 0.0
+    app.state.load_spike = None
     if settings.ACTUATOR == "aws":
         try:
             from backend.app.aws.metrics import CloudWatchMetricsPublisher
@@ -230,6 +234,9 @@ lambda: True)(),
             "scale_up_threshold_rpm": round(cfg.capacity_per_instance * cfg.target_utilization, 2),
             "min_history_points": settings.min_history_points,
             "sample_interval_s": round(settings.CONTROL_INTERVAL_S / settings.TIME_SCALE, 2),
+            "loop_paused": bool(getattr(app.state, "loop_paused", False)),
+            "forecast_bias_percent": float(getattr(app.state, "forecast_bias_percent", 0.0) or 0.0),
+            "load_spike": getattr(app.state, "load_spike", None),
             **{k:v for k,v in data.items() if k not in {"profile","PROFILE"}}}
 
 
@@ -404,21 +411,30 @@ def set_policy(req: PolicyRequest):
 
 @app.post("/autoscaler/start")
 def start_loop():
-    return {"started": True}
+    app.state.loop_paused = False
+    return {"started": True, "paused": False}
 
 
 @app.post("/autoscaler/stop")
 def stop_loop():
-    return {"stopped": True}
+    app.state.loop_paused = True
+    return {"stopped": True, "paused": True}
 
 
 @app.post("/faults/bias")
 def fault_bias(req: FaultBiasRequest):
+    """Inject a forecast bias (percent) so the ML prediction is skewed."""
+    app.state.forecast_bias_percent = float(req.bias_percent)
     return {"bias_percent": req.bias_percent, "simulated": True}
 
 
 @app.post("/faults/spike")
 def fault_spike(req: FaultSpikeRequest):
+    """Inject a load spike: multiply observed rpm by magnitude for N minutes."""
+    app.state.load_spike = {
+        "magnitude": float(req.magnitude),
+        "until": time.time() + float(req.duration_minutes) * 60.0,
+    }
     return {"magnitude": req.magnitude, "duration_minutes": req.duration_minutes, "simulated": True}
 
 
@@ -494,6 +510,16 @@ def metrics_current():
     return MetricsResponse(
         current_utilization=util,
         latency_ms=latency_ms,
+        latency_p50_ms=(
+            round(float(live_metrics.latency_p50_ms), 2)
+            if live_metrics.request_count > 0 and live_metrics.telemetry_source == "local_gateway"
+            else None
+        ),
+        latency_p95_ms=(
+            round(float(live_metrics.latency_p95_ms), 2)
+            if live_metrics.request_count > 0 and live_metrics.telemetry_source == "local_gateway"
+            else None
+        ),
         cost_usd=cost_usd,
         energy_kwh=energy_kwh,
         sla_count=sla_count,
@@ -695,8 +721,14 @@ async def control_loop_worker(app: FastAPI):
         while True:
             await asyncio.sleep(settings.scaled_delay(settings.CONTROL_INTERVAL_S))
             try:
+                if getattr(app.state, "loop_paused", False):
+                    app.state.last_tick_time = datetime.now(UTC).isoformat()
+                    continue
                 telemetry_failure = await _refresh_aws_telemetry(app)
                 actual = live_metrics.requests_per_min if live_metrics.request_count > 0 else 0.0
+                spike = getattr(app.state, "load_spike", None)
+                if spike and time.time() < float(spike.get("until", 0.0)):
+                    actual = actual * float(spike.get("magnitude", 1.0))
                 current = act.current()
                 loop.state.current_instances = current
                 latency = live_metrics.latency_p95_ms if live_metrics.request_count > 0 else 0.0
@@ -735,6 +767,10 @@ async def control_loop_worker(app: FastAPI):
                     horizon = min(horizon, max(model.horizons))
                     forecast = model.predict(hist.tail(480))
                     p50, p90 = map(float, forecast.latest(horizon))
+                    bias_pct = float(getattr(app.state, "forecast_bias_percent", 0.0) or 0.0)
+                    if bias_pct:
+                        p50 = p50 * (1.0 + bias_pct / 100.0)
+                        p90 = p90 * (1.0 + bias_pct / 100.0)
                     model_version = str(getattr(model, "version", type(model).__name__))
                     if not (math.isfinite(p50) and math.isfinite(p90)):
                         raise ValueError("model returned non-finite forecast values")

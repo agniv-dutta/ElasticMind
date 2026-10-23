@@ -57,6 +57,8 @@ class FaultSpikeRequest(BaseModel):
 class MetricsResponse(BaseModel):
     current_utilization: float = Field(..., description="measured or simulated based on provenance")
     latency_ms: float = Field(..., description="simulated")
+    latency_p50_ms: float | None = Field(default=None, description="measured")
+    latency_p95_ms: float | None = Field(default=None, description="measured")
     cost_usd: float = Field(..., description="simulated")
     energy_kwh: float = Field(..., description="simulated")
     sla_count: int = Field(..., description="simulated")
